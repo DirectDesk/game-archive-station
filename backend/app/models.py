@@ -44,3 +44,12 @@ class DownloadTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     game: Mapped[Game] = relationship(back_populates="download_tasks")
+
+
+class SystemConfig(Base):
+    """单行系统状态；create_all 会在已有数据库上平滑创建该新表。"""
+
+    __tablename__ = "system_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

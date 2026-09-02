@@ -10,7 +10,8 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .downloader import DownloadWorker
 from .models import DownloadTask
-from .routers import downloads, games, metadata
+from .routers import downloads, games, metadata, scans
+from .scheduler import scan_scheduler
 
 
 @asynccontextmanager
@@ -29,7 +30,10 @@ async def lifespan(app: FastAPI):
             task.status = "pending"
             await worker.enqueue(task.id)
         await db.commit()
+    # 只注册每日增量任务；不会在服务启动时扫描，更不会自动执行全量扫描。
+    scan_scheduler.start()
     yield
+    scan_scheduler.stop()
     await worker.stop()
 
 
@@ -39,6 +43,7 @@ app.mount("/data", StaticFiles(directory=settings.data_dir, check_dir=False), na
 app.include_router(games.router)
 app.include_router(metadata.router)
 app.include_router(downloads.router)
+app.include_router(scans.router)
 
 frontend = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 if frontend.exists():

@@ -69,3 +69,31 @@ class MetadataResult(BaseModel):
     rating: float | None = None
     tags: str = ""
     series: str = ""
+
+
+class AsyncTaskOut(BaseModel):
+    id: str
+    status: str
+    message: str = ""
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    result_game_id: int | None = None
+
+
+class RefreshMetadataTaskOut(AsyncTaskOut):
+    """单游戏元数据刷新提交后的异步任务状态。"""
+
+    pass
+
+
+class ScanStatusOut(AsyncTaskOut):
+    mode: str | None = None
+    scanned_directories: int = 0
+    discovered_games: int = 0
+    skipped_directories: int = 0
+    logs: list[str] = []
+    next_run_at: datetime | None = None
+
+
+class ScanTrigger(BaseModel):
+    confirm: bool = False

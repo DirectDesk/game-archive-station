@@ -3,12 +3,20 @@ services:
     build: .
     container_name: game-archive
     restart: unless-stopped
+    dns:
+      - 192.168.20.1
+      - 223.5.5.5
+    extra_hosts:
+      - "api.rawg.io:104.16.249.144"
     ports:
       - "8080:8000"
     environment:
-      RAWG_API_KEY: ${RAWG_API_KEY:-}
+    - SCAN_ENABLE=true
+    - SCAN_CRON=0 3 * * *
+    - SCAN_THROTTLE_MS=50
+    - SCAN_WEEKLY_FULL_CHECK=false
+    - RAWG_API_KEY=***REMOVED-RAWG-API-KEY***
     volumes:
-      # 修改左侧为飞牛本地存储中的实际目录。
       - /vol1/1000/docker/game-archive/data:/app/data
-      # 可选：飞牛 WebDAV 挂载百度网盘的宿主路径。
       - /vol02/1000-1-dd21201d/game_station:/vol/baidu
+

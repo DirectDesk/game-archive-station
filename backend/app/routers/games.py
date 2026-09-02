@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -8,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import settings
 from ..database import get_db
 from ..models import Game
-from ..schemas import GameCreate, GameOut, GameUpdate
+from ..schemas import GameCreate, GameOut, GameUpdate, RefreshMetadataTaskOut
+from ..services import refresh_rawg_game_metadata
+from ..task_manager import task_manager
 
 router = APIRouter(prefix="/api/games", tags=["games"])
 
@@ -77,6 +80,24 @@ async def upload_cover(game_id: int, file: UploadFile = File(...), db: AsyncSess
     await db.commit()
     await db.refresh(game)
     return game
+
+
+@router.post("/{game_id}/refresh-metadata", response_model=RefreshMetadataTaskOut, status_code=202)
+async def refresh_metadata(game_id: int, db: AsyncSession = Depends(get_db)):
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "游戏不存在")
+    if game.source_type != "rawg" or not game.source_id:
+        raise HTTPException(422, "仅支持刷新具有 RAWG 数据源 ID 的游戏")
+    last_refresh = task_manager.game_refreshes.get(game_id)
+    if last_refresh and datetime.utcnow() - last_refresh < timedelta(seconds=60):
+        raise HTTPException(429, "请在 60 秒后再次刷新元数据")
+    task_manager.game_refreshes[game_id] = datetime.utcnow()
+    task = task_manager.create("等待刷新 RAWG 元数据")
+    task["result_game_id"] = game_id
+
+    task_manager.run(task, refresh_rawg_game_metadata(game_id))
+    return task
 
 
 @router.get("/{game_id}/resource")
