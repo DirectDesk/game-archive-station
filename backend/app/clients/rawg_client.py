@@ -1,22 +1,33 @@
+import json
 from datetime import date
 
 import httpx
 
 from ..config import settings
+from ..database import SessionLocal
+from ..models import SystemConfig
 
 
 class RawgClient:
     base_url = "https://api.rawg.io/api"
 
     def __init__(self):
-        if not settings.rawg_api_key:
+        pass
+
+    async def _api_key(self) -> str:
+        async with SessionLocal() as db:
+            config = await db.get(SystemConfig, 1)
+            key = config.rawg_api_key if config and config.rawg_api_key else settings.rawg_api_key
+        if not key:
             raise ValueError("未配置 RAWG_API_KEY")
+        return key
 
     async def search_games(self, query: str, page_size: int = 10) -> list[dict]:
+        key = await self._api_key()
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(
                 f"{self.base_url}/games",
-                params={"key": settings.rawg_api_key, "search": query, "page_size": page_size},
+                params={"key": key, "search": query, "page_size": page_size},
             )
             response.raise_for_status()
             return [
@@ -25,10 +36,11 @@ class RawgClient:
             ]
 
     async def get_game_detail(self, rawg_id: str) -> dict:
+        key = await self._api_key()
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(
                 f"{self.base_url}/games/{rawg_id}",
-                params={"key": settings.rawg_api_key},
+                params={"key": key},
             )
             response.raise_for_status()
             return self._map_detail(response.json())
@@ -38,11 +50,13 @@ class RawgClient:
         developers = ", ".join(value.get("name", "") for value in item.get("developers", []))
         publishers = ", ".join(value.get("name", "") for value in item.get("publishers", []))
         tags = ", ".join(value.get("name", "") for value in item.get("tags", []))
+        screenshots = [value["image"] for value in item.get("short_screenshots", [])[1:] if value.get("image")]
         release_date = item.get("released")
         return {
             "title": item.get("name", ""),
             "alias": "",
             "cover_url": item.get("background_image", ""),
+            "screenshots": json.dumps(screenshots),
             "description": item.get("description_raw", "") or "",
             "developer": developers,
             "publisher": publishers,
