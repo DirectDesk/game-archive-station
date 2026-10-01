@@ -1,4 +1,6 @@
 import json
+import os
+import re
 from datetime import date
 
 import httpx
@@ -17,7 +19,7 @@ class RawgClient:
     async def _api_key(self) -> str:
         async with SessionLocal() as db:
             config = await db.get(SystemConfig, 1)
-            key = config.rawg_api_key if config and config.rawg_api_key else settings.rawg_api_key
+            key = config.rawg_api_key if config and config.rawg_api_key else os.getenv("RAWG_API_KEY", "") or settings.rawg_api_key
         if not key:
             raise ValueError("未配置 RAWG_API_KEY")
         return key
@@ -52,11 +54,13 @@ class RawgClient:
         tags = ", ".join(value.get("name", "") for value in item.get("tags", []))
         screenshots = [value["image"] for value in item.get("short_screenshots", [])[1:] if value.get("image")]
         release_date = item.get("released")
+        version_match = re.search(r"(?i)(?:^|[ ._-])(v\d+(?:\.\d+){1,3})(?:$|[ ._-])", item.get("name", ""))
         return {
             "title": item.get("name", ""),
             "alias": "",
             "cover_url": item.get("background_image", ""),
             "screenshots": json.dumps(screenshots),
+            "version": version_match.group(1) if version_match else "",
             "description": item.get("description_raw", "") or "",
             "developer": developers,
             "publisher": publishers,

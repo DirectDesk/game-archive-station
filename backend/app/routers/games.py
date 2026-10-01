@@ -20,7 +20,8 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_type: str = "", play_status: str = "", tag: str = "", sort: str = "updated"):
     query = select(Game)
     if q:
-        query = query.where(Game.title.ilike(f"%{q}%"))
+        term = f"%{q}%"
+        query = query.where(or_(Game.title.ilike(term), Game.alias.ilike(term), Game.developer.ilike(term), Game.publisher.ilike(term), Game.series.ilike(term)))
     if source_type:
         query = query.where(Game.source_type == source_type)
     if play_status:
@@ -84,11 +85,33 @@ async def upload_cover(game_id: int, file: UploadFile = File(...), db: AsyncSess
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(404, "游戏不存在")
+    if (file.content_type or "") not in {"image/jpeg", "image/png"}:
+        raise HTTPException(415, "封面仅支持 JPG 或 PNG 格式")
     cover_dir = settings.data_dir / "covers"
     cover_dir.mkdir(parents=True, exist_ok=True)
     path = cover_dir / f"{game_id}_{Path(file.filename or 'cover.jpg').name}"
     path.write_bytes(await file.read())
     game.cover_url = f"/data/covers/{path.name}"
+    await db.commit()
+    await db.refresh(game)
+    return game
+
+
+@router.post("/{game_id}/screenshots", response_model=GameOut)
+async def upload_screenshot(game_id: int, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "游戏不存在")
+    if (file.content_type or "") not in {"image/jpeg", "image/png"}:
+        raise HTTPException(415, "截图仅支持 JPG 或 PNG 格式")
+    directory = settings.data_dir / "screenshots"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{game_id}_{Path(file.filename or 'screenshot.jpg').name}"
+    path.write_bytes(await file.read())
+    import json
+    values = json.loads(game.screenshots or "[]")
+    values.append(f"/data/screenshots/{path.name}")
+    game.screenshots = json.dumps(values)
     await db.commit()
     await db.refresh(game)
     return game

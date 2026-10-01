@@ -67,7 +67,7 @@ class LibraryScanner:
                     source_id="",
                     resource_type=resource_type,
                     resource_url=folder_path,
-                    play_status="archived",
+                    play_status="favorite",
                 ))
                 await db.commit()
                 logger.info("扫描发现游戏目录（未匹配元数据，待手动补充）：%s", folder_path)
@@ -83,7 +83,7 @@ class LibraryScanner:
                     "source_id": "",
                 }
             metadata = await translation_service.translate_rawg_metadata(db, metadata)
-            metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "archived"})
+            metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite"})
             db.add(Game(**metadata))
             await db.commit()
             logger.info("扫描发现游戏目录（已匹配元数据）：%s", folder_path)

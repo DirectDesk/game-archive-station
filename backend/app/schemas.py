@@ -9,6 +9,7 @@ class GameBase(BaseModel):
     alias: str = ""
     cover_url: str = ""
     screenshots: str = ""
+    original_data: str = ""
     description: str = ""
     developer: str = ""
     publisher: str = ""
@@ -16,11 +17,12 @@ class GameBase(BaseModel):
     rating: float | None = Field(default=None, ge=0, le=100, multiple_of=0.1)
     tags: str = ""
     series: str = ""
+    version: str = ""
     source_type: str = "custom"
     source_id: str = ""
     resource_type: Literal["nas_cloud", "nas_local", "web_link", "none"] = "none"
     resource_url: str = ""
-    play_status: str = "favorite"
+    play_status: Literal["favorite", "playing", "completed"] = "favorite"
 
 
 class GameCreate(GameBase):
@@ -51,6 +53,7 @@ class MetadataResult(BaseModel):
     rating: float | None = None
     tags: str = ""
     series: str = ""
+    version: str = ""
 
 
 class AsyncTaskOut(BaseModel):

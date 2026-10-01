@@ -20,14 +20,18 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         columns = (await connection.execute(text("PRAGMA table_info(games)"))).mappings().all()
-        if "screenshots" not in {column["name"] for column in columns}:
-            await connection.execute(text("ALTER TABLE games ADD COLUMN screenshots TEXT DEFAULT ''"))
+        existing_game_columns = {column["name"] for column in columns}
+        for name, definition in {"screenshots": "TEXT DEFAULT ''", "original_data": "TEXT DEFAULT ''", "version": "VARCHAR(100) DEFAULT ''"}.items():
+            if name not in existing_game_columns:
+                await connection.execute(text(f"ALTER TABLE games ADD COLUMN {name} {definition}"))
         config_columns = (await connection.execute(text("PRAGMA table_info(system_config)"))).mappings().all()
         for name, definition in {"scan_enable": "BOOLEAN DEFAULT 1", "scan_cron": "VARCHAR(50) DEFAULT '0 3 * * *'", "scan_throttle_ms": "INTEGER DEFAULT 50", "scan_root": "VARCHAR(500) DEFAULT '/vol/baidu'", "local_game_root": "VARCHAR(500) DEFAULT '/vol/games'", "download_dir": "VARCHAR(500) DEFAULT '/vol/download/game'", "rawg_api_key": "VARCHAR(200) DEFAULT ''", "auto_translate": "BOOLEAN DEFAULT 0", "translator_type": "VARCHAR(20) DEFAULT 'none'", "tencent_secret_id": "VARCHAR(200) DEFAULT ''", "tencent_secret_key": "VARCHAR(200) DEFAULT ''", "tencent_region": "VARCHAR(50) DEFAULT 'ap-guangzhou'"}.items():
             if name not in {column["name"] for column in config_columns}:
                 await connection.execute(text(f"ALTER TABLE system_config ADD COLUMN {name} {definition}"))
         await connection.execute(text("UPDATE games SET resource_type = 'nas_cloud' WHERE resource_type = 'nas_path'"))
         await connection.execute(text("UPDATE games SET resource_type = 'web_link' WHERE resource_type = 'cloud_link'"))
+        await connection.execute(text("UPDATE games SET play_status = 'favorite' WHERE play_status = 'archived'"))
+        await connection.execute(text("UPDATE games SET play_status = 'playing' WHERE play_status = 'downloading'"))
     async with SessionLocal() as db:
         if not await db.get(SystemConfig, 1):
             db.add(SystemConfig(id=1))

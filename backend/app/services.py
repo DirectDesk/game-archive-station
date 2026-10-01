@@ -30,7 +30,7 @@ async def refresh_rawg_game_metadata(game_id: int) -> None:
         metadata = await translation_service.translate_rawg_metadata(session, metadata)
         for field in (
             "title", "alias", "description", "developer", "publisher", "release_date",
-            "rating", "tags", "series", "source_type", "source_id", "screenshots",
+            "rating", "tags", "series", "source_type", "source_id", "screenshots", "version", "original_data",
         ):
             setattr(game, field, metadata[field])
         # 先保存远程 URL；封面 CDN 临时失败不应使元数据刷新失败。
