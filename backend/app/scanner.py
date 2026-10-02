@@ -141,16 +141,18 @@ class LibraryScanner:
                 # Steam fallback：中文名搜索支持好，appdetails 返回中文元数据
                 try:
                     steam_client = SteamClient()
-                    steam_results = await steam_client.search_games(search_name, page_size=5)
+                    # 优先用父目录名搜索（用户常用中文名作为父目录，Steam中文名搜索效果好）
+                    steam_results = []
+                    if folder.parent and folder.parent.name and folder.parent.name not in (".", ".."):
+                        steam_results = await steam_client.search_games(folder.parent.name, page_size=5)
+                    if not steam_results:
+                        steam_results = await steam_client.search_games(search_name, page_size=5)
                     if not steam_results:
                         steam_results = await steam_client.search_games(folder.name, page_size=5)
-                    # 仍无结果时，用父目录名搜索（用户常用中文名作为父目录）
-                    if not steam_results and folder.parent and folder.parent.name:
-                        steam_results = await steam_client.search_games(folder.parent.name, page_size=5)
                     # 过滤掉原声集/DLC等非主游戏结果
                     steam_results = [
                         r for r in steam_results
-                        if not re.search(r"(?i)(soundtrack|ost|original soundtrack|dlc|demo|trial|art pack|artbook|art work|wallpaper|theme|cosmetic|skin pack)", r.get("title", ""))
+                        if not re.search(r"(?i)(soundtrack|ost|original soundtrack|dlc|demo|trial|art pack|artbook|art work|artworks|wallpaper|theme|cosmetic|skin pack)", r.get("title", ""))
                         and not re.search(r"(艺术|画集|原画|原声|壁纸|主题|皮肤|道具|礼包)", r.get("title", ""))
                     ]
                 except Exception:
