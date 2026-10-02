@@ -48,7 +48,12 @@ class DlsiteClient:
                 async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
                     response = await client.get(self.base_url, params=params, headers=headers)
                     response.raise_for_status()
-                    return response.json()
+                    data = response.json()
+                    # DLsite API 对不同 UA/请求方式返回结构不同：
+                    # 有时返回 {"value": [...], "Count": N}，有时直接返回 [...]
+                    if isinstance(data, list):
+                        return {"value": data}
+                    return data
             except Exception as exc:
                 if attempt == retries - 1:
                     raise
