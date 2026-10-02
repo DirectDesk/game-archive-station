@@ -9,6 +9,13 @@ from sqlalchemy import select
 
 from .clients.rawg_client import RawgClient
 from .clients.steam_client import SteamClient
+
+def _is_non_main_title(title: str) -> bool:
+    """简单内联过滤：标题包含非主游戏关键词返回True。"""
+    t = title.lower()
+    keywords = ["soundtrack", "ost", "dlc", "demo", "trial", "beta",
+                "typing", "quiz", "expansion", "pack"]
+    return any(kw in t for kw in keywords)
 from .config import settings
 from .database import SessionLocal
 from .models import Game, SystemConfig
@@ -113,7 +120,7 @@ class LibraryScanner:
             try:
                 # page_size=5 取多个结果，按标题相似度过滤，避免不相关结果挡住 vndb
                 for item in await client.search_games(search_name, page_size=5):
-                    if not self._is_main_game_title(item.get("title", "")):
+                    if _is_non_main_title(item.get("title", "")):
                         continue
                     if self._title_match(search_name, item.get("title", "")):
                         candidates = [item]
@@ -121,7 +128,7 @@ class LibraryScanner:
                 # 清洗名无相关结果时，用原始名再试一次
                 if not candidates:
                     for item in await client.search_games(folder.name, page_size=5):
-                        if not self._is_main_game_title(item.get("title", "")):
+                        if _is_non_main_title(item.get("title", "")):
                             continue
                         if self._title_match(folder.name, item.get("title", "")):
                             candidates = [item]
