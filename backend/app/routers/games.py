@@ -180,10 +180,13 @@ async def change_cover_source(
 
 
 @router.get("/{game_id}/tags/resolve", response_model=GameOut)
-async def resolve_game_tags(game_id: int, source: str = "", db: AsyncSession = Depends(get_db), config: SystemConfig = Depends(get_config)):
+async def resolve_game_tags(game_id: int, source: str = "", db: AsyncSession = Depends(get_db)):
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="游戏不存在")
+    config = await db.get(SystemConfig, 1)
+    if not config:
+        config = SystemConfig(id=1)
     await resolve_tags(game, config, source)
     await db.commit()
     await db.refresh(game)
