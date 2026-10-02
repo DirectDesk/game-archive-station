@@ -149,6 +149,7 @@ async def get_vndb_detail(source_id: str) -> dict:
             release_date = date.fromisoformat(released) if released else None
         except (ValueError, TypeError):
             release_date = None
+        return {"source_type": "vndb", "source_id": value.get("id", ""), "title": value.get("title", ""), "alias": value.get("alttitle", ""), "cover_url": (value.get("image") or {}).get("url", ""), "description": value.get("description", ""), "developer": ", ".join(x.get("name", "") for x in value.get("developers", [])), "publisher": "", "release_date": release_date, "rating": value.get("rating"), "tags": ", ".join(x.get("name", "") for x in value.get("tags", [])), "series": "", "screenshots": "", "version": ""}
 
 
 async def refresh_game_metadata(game_id: int) -> None:
