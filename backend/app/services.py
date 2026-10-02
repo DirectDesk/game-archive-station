@@ -25,7 +25,7 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
     try:
         priority = json.loads(config.screenshot_source_priority or "[]")
     except json.JSONDecodeError:
-        priority = ["rawg", "steam", "vndb", "dlsite"]
+        priority = ["steam", "rawg", "vndb", "dlsite"]
     limit = max(0, int(config.max_screenshots or 5))
     metadata = {}
     try:
@@ -97,6 +97,8 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
     directory.mkdir(parents=True, exist_ok=True)
     if requested_source:
         priority = [requested_source]
+    elif game.source_type == "steam" and "steam" in priority:
+        priority = ["steam"] + [s for s in priority if s != "steam"]
     for source in priority:
         urls = candidates.get(source, [])[:limit]
         if not urls:
