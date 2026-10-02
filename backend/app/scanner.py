@@ -34,6 +34,16 @@ class LibraryScanner:
         cleaned = re.sub(r"[._\-]+", " ", cleaned)
         # 去掉方括号内容（如 [GuruGuru Craft]）
         cleaned = re.sub(r"\[.*?\]", " ", cleaned)
+        # 去掉常见破解组/发布组前缀后缀（3DMGAME、DARKSiDERS、CODEX 等）
+        scene_groups = [
+            "3DMGAME", "DARKSiDERS", "CODEX", "RELOADED", "CPY", "SKIDROW",
+            "PLAZA", "HOODLUM", "FitGirl", "EMPRESS", "RAZOR", "TiNYiSO",
+            "DOGE", "KaOs", "VACE", "GOG", "DINOByTES", "FLT", "FAIRLIGHT",
+            "DEVIANCE", "MYTH", "P2P", "RVT", "SiMPLEX", "TENOKE", "RUNE",
+            "Chronos", "Goldberg", "0x0007", "Brixton", "Kapi", "RedDevil",
+        ]
+        for group in scene_groups:
+            cleaned = re.sub(rf"(?i)\b{re.escape(group)}\b", " ", cleaned)
         # 去掉首尾空格，合并多空格
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned
@@ -127,6 +137,9 @@ class LibraryScanner:
                     steam_results = await steam_client.search_games(search_name, page_size=5)
                     if not steam_results:
                         steam_results = await steam_client.search_games(folder.name, page_size=5)
+                    # 仍无结果时，用父目录名搜索（用户常用中文名作为父目录）
+                    if not steam_results and folder.parent and folder.parent.name:
+                        steam_results = await steam_client.search_games(folder.parent.name, page_size=5)
                     # 过滤掉原声集/DLC等非主游戏结果
                     steam_results = [
                         r for r in steam_results
