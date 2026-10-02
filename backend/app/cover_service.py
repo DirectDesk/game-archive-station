@@ -5,7 +5,7 @@ import httpx
 from .config import settings
 
 
-async def cache_cover(game_id: int, cover_url: str, source: str) -> str:
+async def cache_cover(game_id: int, cover_url: str, source: str = "rawg") -> str:
     """下载封面到应用数据卷；只操作 /app/data，不触碰 WebDAV 挂载。"""
     if not cover_url.startswith(("http://", "https://")):
         return cover_url

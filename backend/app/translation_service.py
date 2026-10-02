@@ -2,9 +2,12 @@ from sqlalchemy import select
 import json
 import re
 from sqlalchemy.ext.asyncio import AsyncSession
+import logging
 
 from .clients.translator import get_translator
 from .models import SystemConfig, TranslationGlossary
+
+logger = logging.getLogger(__name__)
 
 
 class TranslationService:
@@ -35,7 +38,8 @@ class TranslationService:
             return translated
         try:
             return await self.translator.translate(text)
-        except Exception:
+        except Exception as exc:
+            logger.warning("翻译失败: %s", exc)
             return text
 
     async def translate_fields(self, data: dict, field_map: dict) -> dict:
@@ -60,6 +64,8 @@ class TranslationService:
         metadata["original_data"] = json.dumps(original, ensure_ascii=False)
         config = await db.get(SystemConfig, 1)
         if not config or not config.auto_translate:
+            if config and config.translator_type != "none":
+                logger.warning("自动翻译已关闭，但 translator_type=%s", config.translator_type)
             return metadata
         await self.load(db)
         translated = await self.translate_fields(metadata, {"title": "game_title", "description": "", "tags": "tag"})

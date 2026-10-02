@@ -49,8 +49,13 @@ class LibraryScanner:
 
     async def _create_game_from_folder(self, folder: Path, resource_type: str, config: SystemConfig) -> bool:
         async with SessionLocal() as db:
-            folder_path = str(folder.absolute())
-            exists = await db.scalar(select(Game.id).where(Game.resource_url == folder_path))
+            folder_path = str(folder.resolve()).rstrip("/")
+            exists = await db.scalar(
+                select(Game.id).where(
+                    (Game.resource_url == folder_path)
+                    | ((Game.title == folder.name) & (Game.resource_type == resource_type))
+                )
+            )
             if exists:
                 return False
 
@@ -61,6 +66,18 @@ class LibraryScanner:
             except Exception:
                 logger.exception("RAWG 搜索失败，创建基础游戏记录：%s", folder_path)
                 candidates = []
+            source_type = "rawg"
+            if not candidates:
+                try:
+                    from .services import search_vndb
+
+                    vndb_results = await search_vndb(folder.name)
+                except Exception:
+                    logger.exception("VNDB fallback 搜索失败：%s", folder_path)
+                    vndb_results = []
+                if vndb_results:
+                    candidates = [vndb_results[0]]
+                    source_type = "vndb"
             if not candidates:
                 game = Game(
                     title=folder.name,
@@ -75,14 +92,22 @@ class LibraryScanner:
                 db.add(game)
                 if config.scan_fetch_screenshots:
                     await db.flush()
-                    await fetch_game_screenshots(game, config)
+                    try:
+                        await fetch_game_screenshots(game, config)
+                    except Exception:
+                        logger.exception("扫描截图抓取失败：%s", folder_path)
                 await db.commit()
                 logger.info("扫描发现游戏目录（未匹配元数据，待手动补充）：%s", folder_path)
                 return True
             try:
-                metadata = await client.get_game_detail(candidates[0]["source_id"])
+                if source_type == "vndb":
+                    from .services import get_vndb_detail
+
+                    metadata = await get_vndb_detail(candidates[0]["source_id"])
+                else:
+                    metadata = await client.get_game_detail(candidates[0]["source_id"])
             except Exception:
-                logger.exception("RAWG 详情获取失败，创建基础游戏记录：%s", folder_path)
+                logger.exception("%s 详情获取失败，创建基础游戏记录：%s", source_type.upper(), folder_path)
                 metadata = {
                     "title": folder.name,
                     "alias": "",
@@ -93,12 +118,16 @@ class LibraryScanner:
             if version_match and not metadata.get("version"):
                 metadata["version"] = version_match.group(0)
             metadata = await translation_service.translate_metadata(db, metadata)
+            metadata.setdefault("source_type", source_type)
             metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite"})
             game = Game(**metadata)
             db.add(game)
             if config.scan_fetch_screenshots:
                 await db.flush()
-                await fetch_game_screenshots(game, config)
+                try:
+                    await fetch_game_screenshots(game, config)
+                except Exception:
+                    logger.exception("扫描截图抓取失败：%s", folder_path)
             await db.commit()
             logger.info("扫描发现游戏目录（已匹配元数据）：%s", folder_path)
             return True

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -12,13 +13,15 @@ from .models import Game, SystemConfig
 from .translation_service import translation_service
 from .config import settings
 
+logger = logging.getLogger(__name__)
+
 
 async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_source: str = "") -> list[str]:
     """按配置优先级获取并缓存截图；失败的来源会继续尝试下一个来源。"""
     try:
         priority = json.loads(config.screenshot_source_priority or "[]")
     except json.JSONDecodeError:
-        priority = []
+        priority = ["rawg", "steam", "vndb", "dlsite"]
     limit = max(0, int(config.max_screenshots or 5))
     metadata = {}
     try:
@@ -33,9 +36,18 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
             candidates["rawg"] = json.loads(game.screenshots or "[]") if game.source_type == "rawg" else []
         except json.JSONDecodeError:
             candidates["rawg"] = []
-    if game.steam_appid:
+    steam_appid = game.steam_appid or metadata.get("steam_appid", "")
+    if not steam_appid and game.source_type == "rawg" and game.source_id:
+        try:
+            rawg_metadata = await RawgClient().get_game_detail(game.source_id)
+            steam_appid = rawg_metadata.get("steam_appid", "")
+            if rawg_metadata.get("screenshots") and not candidates.get("rawg"):
+                candidates["rawg"] = json.loads(rawg_metadata["screenshots"])
+        except Exception:
+            logger.warning("读取 RAWG Steam 商店信息失败：%s", game.source_id, exc_info=True)
+    if steam_appid:
         candidates["steam"] = [
-            f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{game.steam_appid}/ss_{index}.jpg"
+            f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{steam_appid}/ss_{index}.jpg"
             for index in range(1, limit + 1)
         ]
     if game.source_type == "vndb" and game.source_id:
@@ -138,6 +150,40 @@ async def refresh_game_metadata(game_id: int) -> None:
             await session.rollback()
 
 
+async def refresh_vndb_game_metadata(game_id: int) -> None:
+    """按当前标题重新搜索 VNDB，并用首个结果的详情刷新游戏元数据。"""
+    async with SessionLocal() as session:
+        game = await session.get(Game, game_id)
+        if not game:
+            raise RuntimeError("游戏不存在")
+
+        results = await search_vndb(game.title)
+        if not results:
+            raise RuntimeError("VNDB 未找到匹配的游戏")
+        source_id = results[0].get("source_id", "")
+        if not source_id:
+            raise RuntimeError("VNDB 搜索结果缺少数据源 ID")
+
+        metadata = await get_vndb_detail(source_id)
+        metadata = await translation_service.translate_metadata(session, metadata)
+        for field in (
+            "title", "alias", "description", "developer", "publisher", "release_date",
+            "rating", "tags", "series", "source_type", "source_id", "screenshots", "version",
+            "original_data",
+        ):
+            if field in metadata:
+                setattr(game, field, metadata[field])
+        game.cover_url = metadata.get("cover_url", "")
+        await session.commit()
+
+        try:
+            game.cover_url = await cache_cover(game.id, metadata.get("cover_url", ""), "vndb")
+            game.cover_source = "vndb"
+            await session.commit()
+        except Exception:
+            await session.rollback()
+
+
 async def refresh_rawg_game_metadata(game_id: int) -> None:
     """仅访问 RAWG、SQLite 和 /app/data 封面缓存，绝不访问 WebDAV。"""
     async with SessionLocal() as session:
@@ -159,9 +205,14 @@ async def refresh_rawg_game_metadata(game_id: int) -> None:
         game.cover_url = metadata["cover_url"]
         await session.commit()
 
+        steam_url = ""
+        if metadata.get("steam_appid"):
+            steam_url = RawgClient.steam_cover_url(metadata["steam_appid"])
+        cover_url = steam_url or metadata["cover_url"]
+        cover_source = "steam" if steam_url else "rawg"
         try:
-            game.cover_url = await cache_cover(game.id, metadata["cover_url"], "rawg")
-            game.cover_source = "rawg"
+            game.cover_url = await cache_cover(game.id, cover_url, cover_source)
+            game.cover_source = cover_source
             await session.commit()
         except Exception:
             await session.rollback()

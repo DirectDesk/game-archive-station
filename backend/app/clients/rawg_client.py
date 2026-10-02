@@ -45,12 +45,18 @@ class RawgClient:
                 params={"key": key},
             )
             response.raise_for_status()
-            stores_response = await client.get(
-                f"{self.base_url}/games/{rawg_id}/stores",
-                params={"key": key},
-            )
-            stores_response.raise_for_status()
-            return self._map_detail(response.json(), stores_response.json())
+            stores = None
+            try:
+                stores_response = await client.get(
+                    f"{self.base_url}/games/{rawg_id}/stores",
+                    params={"key": key},
+                )
+                stores_response.raise_for_status()
+                stores = stores_response.json()
+            except Exception:
+                # 商店接口不是主元数据依赖；失败时保留 RAWG 主详情并使用空 steam_appid。
+                stores = None
+            return self._map_detail(response.json(), stores)
 
     @staticmethod
     def steam_cover_url(appid: str | int) -> str:
