@@ -41,7 +41,9 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
             game.tag_source = source
             logger.info("标签解析：game_id=%s, source=%s, tags=%.80s", game.id, source, tags)
             return tags
-    logger.warning("标签解析失败：game_id=%s，所有来源均无标签", game.id)
+    game.tags = ""
+    game.tag_source = ""
+    logger.warning("标签解析失败：game_id=%s，所有来源均无标签，已清空", game.id)
     return ""
 
 
