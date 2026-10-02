@@ -43,6 +43,10 @@ class SteamClient:
                 appid = str(item.get("id", ""))
                 if not appid:
                     continue
+                # 只保留主游戏（type=app），过滤 DLC/原声集/试玩版等
+                item_type = item.get("type", "")
+                if item_type and item_type != "app":
+                    continue
                 results.append({
                     "source_type": "steam",
                     "source_id": appid,
