@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from .clients.rawg_client import RawgClient
 from .clients.steam_client import SteamClient
+from .services import resolve_tags
 
 def _is_non_main_title(title: str) -> bool:
     """简单内联过滤：标题包含非主游戏关键词返回True。"""
@@ -259,8 +260,20 @@ class LibraryScanner:
                 metadata["version"] = version_match.group(0)
             metadata = await translation_service.translate_metadata(db, metadata)
             metadata.setdefault("source_type", source_type)
+            # 把该数据源的标签存入 original_data，供标签数据源优先级选择
+            if metadata.get("tags"):
+                try:
+                    orig = json.loads(metadata.get("original_data") or "{}")
+                except json.JSONDecodeError:
+                    orig = {}
+                orig[f"{source_type}_tags"] = metadata["tags"]
+                metadata["original_data"] = json.dumps(orig, ensure_ascii=False)
             metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite"})
             game = Game(**metadata)
+            try:
+                await resolve_tags(game, config)
+            except Exception:
+                logger.exception("标签解析失败：%s", folder_path)
             db.add(game)
             if config.scan_fetch_screenshots:
                 await db.flush()

@@ -27,6 +27,7 @@ class Game(Base):
     release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     tags: Mapped[str] = mapped_column(String(1000), default="")
+    tag_source: Mapped[str] = mapped_column(String(50), default="")
     series: Mapped[str] = mapped_column(String(255), default="")
     version: Mapped[str] = mapped_column(String(100), default="")
     source_type: Mapped[str] = mapped_column(String(20), default="custom")
@@ -58,6 +59,7 @@ class SystemConfig(Base):
     metadata_source_priority: Mapped[str] = mapped_column(String(200), default='["rawg","vndb","dlsite"]')
     cover_source_priority: Mapped[str] = mapped_column(String(200), default='["steam","vndb","dlsite","rawg"]')
     screenshot_source_priority: Mapped[str] = mapped_column(String(200), default='["rawg","steam","vndb","dlsite"]')
+    tag_source_priority: Mapped[str] = mapped_column(String(200), default='["steam","rawg","vndb","dlsite"]')
     scan_fetch_screenshots: Mapped[bool] = mapped_column(Boolean, default=False)
     max_screenshots: Mapped[int] = mapped_column(Integer, default=5)
 

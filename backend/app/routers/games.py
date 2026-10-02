@@ -13,7 +13,7 @@ from ..cover_service import cache_cover
 from ..database import get_db
 from ..models import Game, SystemConfig
 from ..schemas import GameCreate, GameOut, GameUpdate, RefreshMetadataTaskOut
-from ..services import fetch_game_screenshots, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata, search_steam
+from ..services import fetch_game_screenshots, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata, search_steam, resolve_tags
 from ..task_manager import task_manager
 
 router = APIRouter(prefix="/api/games", tags=["games"])
@@ -174,6 +174,17 @@ async def change_cover_source(
             raise HTTPException(502, f"封面下载失败：{exc}") from exc
     game.cover_url = cover_url
     game.cover_source = source
+    await db.commit()
+    await db.refresh(game)
+    return game
+
+
+@router.get("/{game_id}/tags/resolve", response_model=GameOut)
+async def resolve_game_tags(game_id: int, source: str = "", db: AsyncSession = Depends(get_db), config: SystemConfig = Depends(get_config)):
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="游戏不存在")
+    await resolve_tags(game, config, source)
     await db.commit()
     await db.refresh(game)
     return game

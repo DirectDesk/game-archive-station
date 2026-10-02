@@ -132,6 +132,7 @@ class SteamClient:
         description = item.get("detailed_description", "") or item.get("short_description", "") or ""
         # 去掉 HTML 标签
         description = re.sub(r"<[^>]+>", "", description).strip()
+        original_data = json.dumps({"steam_tags": tags}, ensure_ascii=False)
         return {
             "title": item.get("name", ""),
             "alias": "",
@@ -148,4 +149,5 @@ class SteamClient:
             "source_type": "steam",
             "source_id": str(appid),
             "steam_appid": str(appid),
+            "original_data": original_data,
         }

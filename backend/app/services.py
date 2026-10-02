@@ -18,6 +18,30 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 
+
+async def resolve_tags(game: Game, config: SystemConfig, requested_source: str = "") -> str:
+    """按配置优先级从 original_data 中选择标签；返回选中的标签字符串。"""
+    try:
+        priority = json.loads(config.tag_source_priority or "[]")
+    except json.JSONDecodeError:
+        priority = ["steam", "rawg", "vndb", "dlsite"]
+    if requested_source:
+        priority = [requested_source]
+    try:
+        metadata = json.loads(game.original_data or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    for source in priority:
+        tags = metadata.get(f"{source}_tags", "")
+        if tags:
+            game.tags = tags
+            game.tag_source = source
+            logger.info("标签解析：game_id=%s, source=%s, tags=%.80s", game.id, source, tags)
+            return tags
+    logger.warning("标签解析失败：game_id=%s，所有来源均无标签", game.id)
+    return ""
+
+
 async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_source: str = "") -> list[str]:
     """按配置优先级获取并缓存截图；失败的来源会继续尝试下一个来源。"""
     logger.info("开始获取截图：game_id=%s, source_type=%s, source_id=%s, screenshots_field=%.100s",
