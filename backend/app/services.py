@@ -161,6 +161,16 @@ async def get_vndb_detail(source_id: str) -> dict:
         return {"source_type": "vndb", "source_id": value.get("id", ""), "title": display_title, "alias": display_alias, "cover_url": (value.get("image") or {}).get("url", ""), "description": value.get("description", ""), "developer": ", ".join(x.get("name", "") for x in value.get("developers", [])), "publisher": "", "release_date": release_date, "rating": value.get("rating"), "tags": ", ".join(x.get("name", "") for x in value.get("tags", [])), "series": "", "screenshots": "", "version": ""}
 
 
+async def search_dlsite(query: str) -> list[dict]:
+    from .clients.dlsite_client import DlsiteClient
+    return await DlsiteClient().search_games(query, page_size=20)
+
+
+async def get_dlsite_detail(source_id: str) -> dict:
+    from .clients.dlsite_client import DlsiteClient
+    return await DlsiteClient().get_game_detail(source_id)
+
+
 async def refresh_game_metadata(game_id: int) -> None:
     async with SessionLocal() as session:
         game = await session.get(Game, game_id)
@@ -170,6 +180,8 @@ async def refresh_game_metadata(game_id: int) -> None:
             metadata = await RawgClient().get_game_detail(game.source_id)
         elif game.source_type == "vndb":
             metadata = await get_vndb_detail(game.source_id)
+        elif game.source_type == "dlsite":
+            metadata = await get_dlsite_detail(game.source_id)
         else:
             raise RuntimeError("当前数据源不支持刷新元数据")
         metadata = await translation_service.translate_metadata(session, metadata)

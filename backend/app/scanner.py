@@ -119,6 +119,37 @@ class LibraryScanner:
                     source_type = "vndb"
                     logger.info("VNDB fallback 匹配成功：%s -> %s (%s)", folder.name, vndb_results[0].get("title",""), vndb_results[0].get("source_id",""))
             if not candidates:
+                # DLsite fallback：同人游戏（RJ/VJ/BJ编号）优先用编号精准查询
+                try:
+                    from .clients.dlsite_client import DlsiteClient
+
+                    dlsite = DlsiteClient()
+                    workno = dlsite.extract_workno(folder.name)
+                    dlsite_results = []
+                    if workno:
+                        # 有编号：精准查询，不做搜索
+                        work_detail = await dlsite.get_work_by_id(workno)
+                        if work_detail:
+                            dlsite_results = [{
+                                "source_type": "dlsite",
+                                "source_id": workno,
+                                "title": work_detail.get("work_name", ""),
+                                "cover_url": dlsite._full_url((work_detail.get("image_main") or {}).get("url", "")),
+                            }]
+                    else:
+                        # 无编号：关键词搜索
+                        dlsite_results = await dlsite.search_games(search_name, page_size=5)
+                        if not dlsite_results:
+                            dlsite_results = await dlsite.search_games(folder.name, page_size=5)
+                except Exception:
+                    logger.exception("DLsite fallback 搜索失败：%s", folder_path)
+                    dlsite_results = []
+                if dlsite_results:
+                    # DLsite 编号查询是精准匹配；搜索结果按相关性排序，取第一个
+                    candidates = [dlsite_results[0]]
+                    source_type = "dlsite"
+                    logger.info("DLsite fallback 匹配成功：%s -> %s (%s)", folder.name, dlsite_results[0].get("title",""), dlsite_results[0].get("source_id",""))
+            if not candidates:
                 game = Game(
                     title=folder.name,
                     version=(re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", folder.name) or [""])[0],
@@ -144,6 +175,10 @@ class LibraryScanner:
                     from .services import get_vndb_detail
 
                     metadata = await get_vndb_detail(candidates[0]["source_id"])
+                elif source_type == "dlsite":
+                    from .clients.dlsite_client import DlsiteClient
+
+                    metadata = await DlsiteClient().get_game_detail(candidates[0]["source_id"])
                 else:
                     metadata = await client.get_game_detail(candidates[0]["source_id"])
             except Exception:
