@@ -113,9 +113,8 @@ class SteamClient:
             url = s.get("path_full", "")
             if url:
                 screenshots.append(url)
-        # 封面：优先用竖版 library_600x900，回退到 header_image
+        # 封面：优先用竖版 library_600x900
         cover_url = SteamClient.library_cover_url(appid)
-        header_image = item.get("header_image", "")
         # 评分：metacritic 转百分制（rawg 是 0-5 分转 0-100，Steam 用 metacritic 直接是百分制）
         rating = None
         metacritic = item.get("metacritic")
@@ -133,7 +132,6 @@ class SteamClient:
             "title": item.get("name", ""),
             "alias": "",
             "cover_url": cover_url,
-            "header_image": header_image,
             "screenshots": json.dumps(screenshots, ensure_ascii=False),
             "version": "",
             "description": description,
