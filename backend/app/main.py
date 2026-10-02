@@ -32,6 +32,12 @@ async def lifespan(app: FastAPI):
         await connection.execute(text("UPDATE games SET resource_type = 'web_link' WHERE resource_type = 'cloud_link'"))
         await connection.execute(text("UPDATE games SET play_status = 'favorite' WHERE play_status = 'archived'"))
         await connection.execute(text("UPDATE games SET play_status = 'playing' WHERE play_status = 'downloading'"))
+        # 清理 resource_url 重复的记录（保留 id 最小的）
+        await connection.execute(text("""
+            DELETE FROM games WHERE id NOT IN (
+                SELECT MIN(id) FROM games WHERE resource_url != '' GROUP BY resource_url
+            ) AND resource_url != ''
+        """))
     async with SessionLocal() as db:
         if not await db.get(SystemConfig, 1):
             db.add(SystemConfig(id=1))

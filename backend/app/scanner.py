@@ -38,6 +38,17 @@ class LibraryScanner:
         return cleaned
 
     @staticmethod
+    def _title_match(search_name: str, result_title: str) -> bool:
+        """rawg 结果标题与搜索词的单词重叠率 >= 60% 才视为匹配，避免不相关结果挡住 vndb。"""
+        def words(text):
+            return set(re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).split())
+        sw = words(search_name)
+        rw = words(result_title)
+        if not sw:
+            return False
+        return len(sw & rw) / len(sw) >= 0.6
+
+    @staticmethod
     async def _directories(path: Path) -> list[Path]:
         def read_directories():
             # scandir 仅读取当前层的目录元数据；不读取文件内容或文件级 mtime。
@@ -63,23 +74,28 @@ class LibraryScanner:
 
     async def _create_game_from_folder(self, folder: Path, resource_type: str, config: SystemConfig) -> bool:
         async with SessionLocal() as db:
-            folder_path = str(folder.resolve()).rstrip("/")
-            exists = await db.scalar(
-                select(Game.id).where(
-                    (Game.resource_url == folder_path)
-                    | ((Game.title == folder.name) & (Game.resource_type == resource_type))
-                )
-            )
+            # 仅按标准化后的 resource_url 去重；title 会被元数据覆盖，不能用于去重。
+            folder_path = str(folder.resolve()).rstrip("/").replace("//", "/")
+            exists = await db.scalar(select(Game.id).where(Game.resource_url == folder_path))
             if exists:
                 return False
 
             # 文件夹名是唯一可用的低 IO 发现信息；不进入文件夹读取文件。
             client = RawgClient()
+            search_name = self._clean_folder_name_for_search(folder.name)
+            candidates = []
             try:
-                search_name = self._clean_folder_name_for_search(folder.name)
-                candidates = await client.search_games(search_name, page_size=1)
+                # page_size=5 取多个结果，按标题相似度过滤，避免不相关结果挡住 vndb
+                for item in await client.search_games(search_name, page_size=5):
+                    if self._title_match(search_name, item.get("title", "")):
+                        candidates = [item]
+                        break
+                # 清洗名无相关结果时，用原始名再试一次
                 if not candidates:
-                    candidates = await client.search_games(folder.name, page_size=1)
+                    for item in await client.search_games(folder.name, page_size=5):
+                        if self._title_match(folder.name, item.get("title", "")):
+                            candidates = [item]
+                            break
             except Exception:
                 logger.exception("RAWG 搜索失败，创建基础游戏记录：%s", folder_path)
                 candidates = []
@@ -97,8 +113,13 @@ class LibraryScanner:
                     logger.exception("VNDB fallback 搜索失败：%s", folder_path)
                     vndb_results = []
                 if vndb_results:
-                    candidates = [vndb_results[0]]
-                    source_type = "vndb"
+                    # vndb 结果也按相似度过滤（标题或别名）
+                    for item in vndb_results:
+                        if self._title_match(search_name, item.get("title", "")) or \
+                           self._title_match(search_name, item.get("alias", "")):
+                            candidates = [item]
+                            source_type = "vndb"
+                            break
             if not candidates:
                 game = Game(
                     title=folder.name,

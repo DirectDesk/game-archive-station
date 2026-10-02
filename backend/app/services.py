@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_source: str = "") -> list[str]:
     """按配置优先级获取并缓存截图；失败的来源会继续尝试下一个来源。"""
+    logger.info("开始获取截图：game_id=%s, source_type=%s, source_id=%s, screenshots_field=%.100s",
+                game.id, game.source_type, game.source_id, game.screenshots or "")
     try:
         priority = json.loads(config.screenshot_source_priority or "[]")
     except json.JSONDecodeError:
@@ -45,11 +47,10 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
                 candidates["rawg"] = json.loads(rawg_metadata["screenshots"])
         except Exception:
             logger.warning("读取 RAWG Steam 商店信息失败：%s", game.source_id, exc_info=True)
+    # Steam 无公开截图 CDN 规则，移除无效的 ss_N.jpg 猜测；
+    # 截图统一从 RAWG 获取（RAWG 的 short_screenshots 已包含 Steam 来源截图）。
     if steam_appid:
-        candidates["steam"] = [
-            f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{steam_appid}/ss_{index}.jpg"
-            for index in range(1, limit + 1)
-        ]
+        logger.info("游戏 %s 有 steam_appid=%s，但截图来源跳过 Steam（无有效截图 CDN）", game.id, steam_appid)
     if game.source_type == "vndb" and game.source_id:
         candidates["vndb"] = await _vndb_screenshots(game.source_id)
     # VNDB 无截图时，按标题从 RAWG 补截图。
@@ -66,6 +67,8 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
     if game.source_type == "dlsite" and game.source_id:
         candidates["dlsite"] = await _dlsite_screenshots(game.source_id)
 
+    logger.info("截图候选：rawg=%d, vndb=%d, dlsite=%d",
+                len(candidates.get("rawg", [])), len(candidates.get("vndb", [])), len(candidates.get("dlsite", [])))
     directory = settings.data_dir / "screenshots"
     directory.mkdir(parents=True, exist_ok=True)
     if requested_source:
@@ -93,7 +96,9 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
         if cached:
             game.screenshots = json.dumps(cached, ensure_ascii=False)
             game.screenshot_source = source
+            logger.info("截图缓存完成：game_id=%s, source=%s, cached=%d", game.id, source, len(cached))
             return cached
+    logger.warning("截图获取失败：game_id=%s，所有来源均无有效截图", game.id)
     return []
 
 
