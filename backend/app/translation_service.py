@@ -31,10 +31,11 @@ class TranslationService:
     async def translate(self, text: str, category: str | None = None) -> str:
         if not text:
             return text
-        # 中文字符占比超过 30% 才认为是中文文本，跳过翻译；
-        # 英文简介中混入少量中文专有名词仍需翻译。
+        # 中文字符占比超过 30% 且不含日文假名，才认为是中文文本，跳过翻译；
+        # 日文也使用汉字，需检测假名（平假名/片假名）区分；英文简介混入少量中文专有名词仍需翻译。
         chinese_count = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
-        if chinese_count / len(text) > 0.3:
+        has_japanese_kana = any("\u3040" <= char <= "\u309f" or "\u30a0" <= char <= "\u30ff" for char in text)
+        if not has_japanese_kana and chinese_count / len(text) > 0.3:
             return text
         translated = self.glossary.get((text, category or "")) or self.glossary.get((text, ""))
         if translated:
