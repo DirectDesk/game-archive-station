@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 
 from .clients.rawg_client import RawgClient
+from .clients.steam_client import SteamClient
 from .cover_service import cache_cover
 from .database import SessionLocal
 from .models import Game, SystemConfig
@@ -48,10 +49,23 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
                 candidates["rawg"] = json.loads(rawg_metadata["screenshots"])
         except Exception:
             logger.warning("读取 RAWG Steam 商店信息失败：%s", game.source_id, exc_info=True)
-    # Steam 无公开截图 CDN 规则，移除无效的 ss_N.jpg 猜测；
-    # 截图统一从 RAWG 获取（RAWG 的 short_screenshots 已包含 Steam 来源截图）。
-    if steam_appid:
-        logger.info("游戏 %s 有 steam_appid=%s，但截图来源跳过 Steam（无有效截图 CDN）", game.id, steam_appid)
+    # Steam 截图：steam 来源游戏直接用已有 screenshots；其他来源有 steam_appid 时调 appdetails 补截图
+    if game.source_type == "steam":
+        try:
+            existing_steam = json.loads(game.screenshots or "[]")
+        except json.JSONDecodeError:
+            existing_steam = []
+        if existing_steam:
+            candidates["steam"] = existing_steam
+    elif steam_appid:
+        try:
+            steam_detail = await SteamClient().get_game_detail(steam_appid)
+            steam_shots = json.loads(steam_detail.get("screenshots") or "[]")
+            if steam_shots:
+                candidates["steam"] = steam_shots
+                logger.info("游戏 %s 从 Steam appdetails 获取 %d 张截图", game.id, len(steam_shots))
+        except Exception:
+            logger.warning("游戏 %s 从 Steam appdetails 获取截图失败", game.id, exc_info=True)
     if game.source_type == "vndb" and game.source_id:
         candidates["vndb"] = await _vndb_screenshots(game.source_id)
     # VNDB 无截图时，按标题从 RAWG 补截图。
@@ -76,8 +90,9 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
         elif game.source_id:
             candidates["dlsite"] = await _dlsite_screenshots(game.source_id)
 
-    logger.info("截图候选：rawg=%d, vndb=%d, dlsite=%d",
-                len(candidates.get("rawg", [])), len(candidates.get("vndb", [])), len(candidates.get("dlsite", [])))
+    logger.info("截图候选：rawg=%d, steam=%d, vndb=%d, dlsite=%d",
+                len(candidates.get("rawg", [])), len(candidates.get("steam", [])),
+                len(candidates.get("vndb", [])), len(candidates.get("dlsite", [])))
     directory = settings.data_dir / "screenshots"
     directory.mkdir(parents=True, exist_ok=True)
     if requested_source:
@@ -183,6 +198,14 @@ async def get_dlsite_detail(source_id: str) -> dict:
     return await DlsiteClient().get_game_detail(source_id)
 
 
+async def search_steam(query: str) -> list[dict]:
+    return await SteamClient().search_games(query, page_size=20)
+
+
+async def get_steam_detail(source_id: str) -> dict:
+    return await SteamClient().get_game_detail(source_id)
+
+
 async def refresh_game_metadata(game_id: int) -> None:
     async with SessionLocal() as session:
         game = await session.get(Game, game_id)
@@ -190,6 +213,8 @@ async def refresh_game_metadata(game_id: int) -> None:
             raise RuntimeError("游戏不存在或缺少数据源 ID")
         if game.source_type == "rawg":
             metadata = await RawgClient().get_game_detail(game.source_id)
+        elif game.source_type == "steam":
+            metadata = await get_steam_detail(game.source_id)
         elif game.source_type == "vndb":
             metadata = await get_vndb_detail(game.source_id)
         elif game.source_type == "dlsite":

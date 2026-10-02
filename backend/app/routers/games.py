@@ -13,7 +13,7 @@ from ..cover_service import cache_cover
 from ..database import get_db
 from ..models import Game, SystemConfig
 from ..schemas import GameCreate, GameOut, GameUpdate, RefreshMetadataTaskOut
-from ..services import fetch_game_screenshots, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata
+from ..services import fetch_game_screenshots, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata, search_steam
 from ..task_manager import task_manager
 
 router = APIRouter(prefix="/api/games", tags=["games"])
@@ -269,6 +269,19 @@ async def refresh_metadata(game_id: int, db: AsyncSession = Depends(get_db)):
         except Exception:
             pass
         if not matched:
+            # Steam fallback：中文名搜索支持好
+            try:
+                import re as _re
+                steam_results = await search_steam(game.title)
+                steam_results = [
+                    r for r in steam_results
+                    if not _re.search(r"(?i)(soundtrack|ost|original soundtrack|dlc|demo|trial)", r.get("title", ""))
+                ]
+                if steam_results:
+                    matched = {"source_type": "steam", "source_id": steam_results[0]["source_id"]}
+            except Exception:
+                pass
+        if not matched:
             try:
                 vndb_results = await search_vndb(game.title)
                 if vndb_results:
@@ -290,12 +303,12 @@ async def refresh_metadata(game_id: int, db: AsyncSession = Depends(get_db)):
             except Exception:
                 pass
         if not matched:
-            raise HTTPException(404, "未在 RAWG/VNDB/DLsite 找到匹配的游戏，请手动编辑")
+            raise HTTPException(404, "未在 RAWG/Steam/VNDB/DLsite 找到匹配的游戏，请手动编辑")
         game.source_type = matched["source_type"]
         game.source_id = matched["source_id"]
         await db.commit()
-    elif game.source_type not in {"rawg", "vndb", "dlsite"} or not game.source_id:
-        raise HTTPException(422, "仅支持刷新具有 RAWG/VNDB/DLsite 数据源 ID 的游戏")
+    elif game.source_type not in {"rawg", "steam", "vndb", "dlsite"} or not game.source_id:
+        raise HTTPException(422, "仅支持刷新具有 RAWG/Steam/VNDB/DLsite 数据源 ID 的游戏")
     last_refresh = task_manager.game_refreshes.get(game_id)
     if last_refresh and datetime.utcnow() - last_refresh < timedelta(seconds=60):
         raise HTTPException(429, "请在 60 秒后再次刷新元数据")
@@ -308,6 +321,7 @@ async def refresh_metadata(game_id: int, db: AsyncSession = Depends(get_db)):
     elif game.source_type == "vndb":
         refresh_task = refresh_vndb_game_metadata(game_id)
     else:
+        # steam / dlsite 用通用 refresh_game_metadata（已在 services.py 中支持）
         refresh_task = refresh_game_metadata(game_id)
     task_manager.run(task, refresh_task)
     return task

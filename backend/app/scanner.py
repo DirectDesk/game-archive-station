@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from .clients.rawg_client import RawgClient
+from .clients.steam_client import SteamClient
 from .config import settings
 from .database import SessionLocal
 from .models import Game, SystemConfig
@@ -101,6 +102,26 @@ class LibraryScanner:
                 candidates = []
             source_type = "rawg"
             if not candidates:
+                # Steam fallback：中文名搜索支持好，appdetails 返回中文元数据
+                try:
+                    steam_client = SteamClient()
+                    steam_results = await steam_client.search_games(search_name, page_size=5)
+                    if not steam_results:
+                        steam_results = await steam_client.search_games(folder.name, page_size=5)
+                    # 过滤掉原声集/DLC等非主游戏结果
+                    steam_results = [
+                        r for r in steam_results
+                        if not re.search(r"(?i)(soundtrack|ost|original soundtrack|dlc|demo|trial)", r.get("title", ""))
+                    ]
+                except Exception:
+                    logger.exception("Steam fallback 搜索失败：%s", folder_path)
+                    steam_results = []
+                if steam_results:
+                    # Steam 搜索按相关性排序，第一个通常即主游戏
+                    candidates = [steam_results[0]]
+                    source_type = "steam"
+                    logger.info("Steam fallback 匹配成功：%s -> %s (appid=%s)", folder.name, steam_results[0].get("title",""), steam_results[0].get("source_id",""))
+            if not candidates:
                 try:
                     from .services import search_vndb
 
@@ -179,6 +200,8 @@ class LibraryScanner:
                     from .clients.dlsite_client import DlsiteClient
 
                     metadata = await DlsiteClient().get_game_detail(candidates[0]["source_id"])
+                elif source_type == "steam":
+                    metadata = await SteamClient().get_game_detail(candidates[0]["source_id"])
                 else:
                     metadata = await client.get_game_detail(candidates[0]["source_id"])
             except Exception:
