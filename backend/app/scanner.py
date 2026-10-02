@@ -47,7 +47,7 @@ class LibraryScanner:
         rw = words(result_title)
         if not sw:
             return False
-        return len(sw & rw) / len(sw) >= 0.6
+        return len(sw & rw) / len(sw) >= 0.7
 
     @staticmethod
     def _is_main_game_title(title: str) -> bool:
