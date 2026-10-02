@@ -150,7 +150,7 @@ class LibraryScanner:
                     # 过滤掉原声集/DLC等非主游戏结果
                     steam_results = [
                         r for r in steam_results
-                        if not re.search(r"(?i)(soundtrack|ost|original soundtrack|dlc|demo|trial)", r.get("title", ""))
+                        if not re.search(r"(?i)(soundtrack|ost|original soundtrack|dlc|demo|trial|art pack|artbook|art work|wallpaper|theme|cosmetic|skin pack)", r.get("title", ""))
                     ]
                 except Exception:
                     logger.exception("Steam fallback 搜索失败：%s", folder_path)
