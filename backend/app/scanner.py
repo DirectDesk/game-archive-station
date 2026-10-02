@@ -50,6 +50,21 @@ class LibraryScanner:
         return len(sw & rw) / len(sw) >= 0.6
 
     @staticmethod
+    def _is_main_game_title(title: str) -> bool:
+        """过滤掉原声集/DLC/试玩版/衍生小游戏等非主游戏结果，避免挡住正确的主游戏匹配。"""
+        non_main_patterns = [
+            r"(?i)soundtrack", r"(?i)ost", r"(?i)original soundtrack",
+            r"(?i)dlc", r"(?i)expansion", r"(?i)pack",
+            r"(?i)demo", r"(?i)trial", r"(?i)beta",
+            r"(?i)typing", r"(?i)quiz", r"(?i)puzzle.*pack",
+            r"(?i)remake.*demo",
+        ]
+        for pattern in non_main_patterns:
+            if re.search(pattern, title):
+                return False
+        return True
+
+    @staticmethod
     async def _directories(path: Path) -> list[Path]:
         def read_directories():
             # scandir 仅读取当前层的目录元数据；不读取文件内容或文件级 mtime。
@@ -88,12 +103,16 @@ class LibraryScanner:
             try:
                 # page_size=5 取多个结果，按标题相似度过滤，避免不相关结果挡住 vndb
                 for item in await client.search_games(search_name, page_size=5):
+                    if not self._is_main_game_title(item.get("title", "")):
+                        continue
                     if self._title_match(search_name, item.get("title", "")):
                         candidates = [item]
                         break
                 # 清洗名无相关结果时，用原始名再试一次
                 if not candidates:
                     for item in await client.search_games(folder.name, page_size=5):
+                        if not self._is_main_game_title(item.get("title", "")):
+                            continue
                         if self._title_match(folder.name, item.get("title", "")):
                             candidates = [item]
                             break
