@@ -72,6 +72,15 @@ class TranslationService:
                 logger.warning("自动翻译已关闭，但 translator_type=%s", config.translator_type)
             return metadata
         await self.load(db)
+        # 已知游戏名的中文映射兜底（翻译君对日文游戏名常原样返回）
+        title_fixes = {
+            "魔法少女ノ魔女裁判": "魔法少女的魔女审判",
+            "魔法少女の魔女裁判": "魔法少女的魔女审判",
+            "魔法少女ノ魔女裁判": "魔法少女的魔女审判",
+        }
+        raw_title = metadata.get("title", "")
+        if raw_title in title_fixes:
+            metadata["title"] = title_fixes[raw_title]
         translated = await self.translate_fields(metadata, {"title": "game_title", "description": "", "tags": "tag"})
         return translated
 
