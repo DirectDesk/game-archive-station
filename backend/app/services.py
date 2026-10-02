@@ -1,3 +1,4 @@
+from datetime import date
 import hashlib
 import json
 import logging
@@ -123,7 +124,11 @@ async def search_vndb(query: str) -> list[dict]:
         response.raise_for_status()
         results = []
         for item in response.json().get("results", []):
-            results.append({"source_type": "vndb", "source_id": item.get("id", ""), "title": item.get("title", ""), "alias": item.get("alttitle", ""), "cover_url": (item.get("image") or {}).get("url", ""), "description": item.get("description", ""), "developer": ", ".join(x.get("name", "") for x in item.get("developers", [])), "publisher": "", "release_date": item.get("released"), "rating": item.get("rating"), "tags": ", ".join(x.get("name", "") for x in item.get("tags", [])), "series": ""})
+            released = item.get("released")
+            try:
+                rel_date = date.fromisoformat(released) if released else None
+            except (ValueError, TypeError):
+                rel_date = None
         return results
 
 
@@ -138,7 +143,11 @@ async def get_vndb_detail(source_id: str) -> dict:
         if not item:
             raise ValueError("VNDB 游戏不存在")
         value = item[0]
-        return {"source_type": "vndb", "source_id": value.get("id", ""), "title": value.get("title", ""), "alias": value.get("alttitle", ""), "cover_url": (value.get("image") or {}).get("url", ""), "description": value.get("description", ""), "developer": ", ".join(x.get("name", "") for x in value.get("developers", [])), "publisher": "", "release_date": value.get("released"), "rating": value.get("rating"), "tags": ", ".join(x.get("name", "") for x in value.get("tags", [])), "series": "", "screenshots": "", "version": ""}
+        released = value.get("released")
+        try:
+            release_date = date.fromisoformat(released) if released else None
+        except (ValueError, TypeError):
+            release_date = None
 
 
 async def refresh_game_metadata(game_id: int) -> None:
