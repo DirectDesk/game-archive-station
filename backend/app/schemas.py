@@ -19,6 +19,7 @@ class GameBase(BaseModel):
     release_date: date | None = None
     rating: float | None = Field(default=None, ge=0, le=100, multiple_of=0.1)
     tags: str = ""
+    tag_source: str = ""
     series: str = ""
     version: str = ""
     source_type: str = "custom"
@@ -55,6 +56,7 @@ class MetadataResult(BaseModel):
     release_date: date | None = None
     rating: float | None = None
     tags: str = ""
+    tag_source: str = ""
     series: str = ""
     version: str = ""
 
