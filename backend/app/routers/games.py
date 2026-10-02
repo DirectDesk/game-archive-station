@@ -188,7 +188,9 @@ async def fetch_screenshots(game_id: int, source: str = "", db: AsyncSession = D
         existing = json.loads(game.screenshots or "[]")
     except json.JSONDecodeError:
         existing = []
-    if existing and not source:
+    # 已有 URL 但全是远程 URL 时，仍执行缓存到本地。
+    has_local = any(url.startswith("/data/") for url in existing)
+    if existing and not source and has_local:
         return game
     config = await db.get(SystemConfig, 1)
     if not config:
@@ -256,8 +258,29 @@ async def refresh_metadata(game_id: int, db: AsyncSession = Depends(get_db)):
     if not game:
         raise HTTPException(404, "游戏不存在")
     if game.source_type == "custom":
-        raise HTTPException(400, "自定义游戏请手动编辑元数据")
-    if game.source_type not in {"rawg", "vndb"} or not game.source_id:
+        # custom 游戏按标题搜索 RAWG（优先）和 VNDB，取第一个匹配结果。
+        from ..services import search_vndb
+
+        matched = None
+        try:
+            rawg_results = await RawgClient().search_games(game.title, page_size=1)
+            if rawg_results:
+                matched = {"source_type": "rawg", "source_id": rawg_results[0]["source_id"]}
+        except Exception:
+            pass
+        if not matched:
+            try:
+                vndb_results = await search_vndb(game.title)
+                if vndb_results:
+                    matched = {"source_type": "vndb", "source_id": vndb_results[0]["source_id"]}
+            except Exception:
+                pass
+        if not matched:
+            raise HTTPException(404, "未在 RAWG/VNDB 找到匹配的游戏，请手动编辑")
+        game.source_type = matched["source_type"]
+        game.source_id = matched["source_id"]
+        await db.commit()
+    elif game.source_type not in {"rawg", "vndb"} or not game.source_id:
         raise HTTPException(422, "仅支持刷新具有 RAWG 或 VNDB 数据源 ID 的游戏")
     last_refresh = task_manager.game_refreshes.get(game_id)
     if last_refresh and datetime.utcnow() - last_refresh < timedelta(seconds=60):

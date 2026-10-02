@@ -24,6 +24,20 @@ class LibraryScanner:
         self.running = False
 
     @staticmethod
+    def _clean_folder_name_for_search(name: str) -> str:
+        """清洗文件夹名用于元数据搜索：替换分隔符为空格、去版本号、去常见后缀。"""
+        cleaned = name
+        # 去掉版本号 v1.2.3 / Ver1.2 / [v1.0] 等
+        cleaned = re.sub(r"(?i)\[?v(?:er)?\.?\d+(?:\.\d+){0,3}\]?", " ", cleaned)
+        # 替换 . _ - 为空格（连续的合并为一个）
+        cleaned = re.sub(r"[._\-]+", " ", cleaned)
+        # 去掉方括号内容（如 [GuruGuru Craft]）
+        cleaned = re.sub(r"\[.*?\]", " ", cleaned)
+        # 去掉首尾空格，合并多空格
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    @staticmethod
     async def _directories(path: Path) -> list[Path]:
         def read_directories():
             # scandir 仅读取当前层的目录元数据；不读取文件内容或文件级 mtime。
@@ -62,7 +76,10 @@ class LibraryScanner:
             # 文件夹名是唯一可用的低 IO 发现信息；不进入文件夹读取文件。
             client = RawgClient()
             try:
-                candidates = await client.search_games(folder.name, page_size=1)
+                search_name = self._clean_folder_name_for_search(folder.name)
+                candidates = await client.search_games(search_name, page_size=1)
+                if not candidates:
+                    candidates = await client.search_games(folder.name, page_size=1)
             except Exception:
                 logger.exception("RAWG 搜索失败，创建基础游戏记录：%s", folder_path)
                 candidates = []
@@ -71,7 +88,11 @@ class LibraryScanner:
                 try:
                     from .services import search_vndb
 
-                    vndb_results = await search_vndb(folder.name)
+                    search_name = self._clean_folder_name_for_search(folder.name)
+                    vndb_results = await search_vndb(search_name)
+                    if not vndb_results:
+                        # 清洗后仍搜不到，用原始名再试一次
+                        vndb_results = await search_vndb(folder.name)
                 except Exception:
                     logger.exception("VNDB fallback 搜索失败：%s", folder_path)
                     vndb_results = []

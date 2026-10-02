@@ -31,7 +31,10 @@ class TranslationService:
     async def translate(self, text: str, category: str | None = None) -> str:
         if not text:
             return text
-        if any("\u4e00" <= char <= "\u9fff" for char in text):
+        # 中文字符占比超过 30% 才认为是中文文本，跳过翻译；
+        # 英文简介中混入少量中文专有名词仍需翻译。
+        chinese_count = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+        if chinese_count / len(text) > 0.3:
             return text
         translated = self.glossary.get((text, category or "")) or self.glossary.get((text, ""))
         if translated:
@@ -39,7 +42,7 @@ class TranslationService:
         try:
             return await self.translator.translate(text)
         except Exception as exc:
-            logger.warning("翻译失败: %s", exc)
+            logger.warning("翻译失败（%s）：%s", category or "default", exc, exc_info=True)
             return text
 
     async def translate_fields(self, data: dict, field_map: dict) -> dict:
@@ -60,7 +63,7 @@ class TranslationService:
         return result
 
     async def translate_metadata(self, db: AsyncSession, metadata: dict) -> dict:
-        original = {key: metadata.get(key, "") for key in ("title", "alias", "description", "developer", "publisher", "tags", "series")}
+        original = {key: metadata.get(key, "") for key in ("title", "alias", "description", "developer", "publisher", "tags", "series", "screenshots", "steam_appid")}
         metadata["original_data"] = json.dumps(original, ensure_ascii=False)
         config = await db.get(SystemConfig, 1)
         if not config or not config.auto_translate:

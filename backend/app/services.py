@@ -52,6 +52,17 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
         ]
     if game.source_type == "vndb" and game.source_id:
         candidates["vndb"] = await _vndb_screenshots(game.source_id)
+    # VNDB 无截图时，按标题从 RAWG 补截图。
+    if game.source_type == "vndb" and not candidates.get("vndb"):
+        try:
+            rawg_candidates = await RawgClient().search_games(game.title, page_size=1)
+            if rawg_candidates:
+                rawg_detail = await RawgClient().get_game_detail(rawg_candidates[0]["source_id"])
+                rawg_shots = json.loads(rawg_detail.get("screenshots") or "[]")
+                if rawg_shots:
+                    candidates["rawg"] = rawg_shots
+        except Exception:
+            logger.warning("VNDB 游戏从 RAWG 补截图失败：%s", game.title, exc_info=True)
     if game.source_type == "dlsite" and game.source_id:
         candidates["dlsite"] = await _dlsite_screenshots(game.source_id)
 
