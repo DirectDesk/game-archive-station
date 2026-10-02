@@ -45,22 +45,38 @@ class RawgClient:
                 params={"key": key},
             )
             response.raise_for_status()
-            return self._map_detail(response.json())
+            stores_response = await client.get(
+                f"{self.base_url}/games/{rawg_id}/stores",
+                params={"key": key},
+            )
+            stores_response.raise_for_status()
+            return self._map_detail(response.json(), stores_response.json())
 
     @staticmethod
-    def _map_detail(item: dict) -> dict:
+    def steam_cover_url(appid: str | int) -> str:
+        return f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900.jpg"
+
+    @staticmethod
+    def _map_detail(item: dict, stores: dict | None = None) -> dict:
         developers = ", ".join(value.get("name", "") for value in item.get("developers", []))
         publishers = ", ".join(value.get("name", "") for value in item.get("publishers", []))
         tags = ", ".join(value.get("name", "") for value in item.get("tags", []))
         screenshots = [value["image"] for value in item.get("short_screenshots", [])[1:] if value.get("image")]
         release_date = item.get("released")
-        version_match = re.search(r"(?i)(?:^|[ ._-])(v\d+(?:\.\d+){1,3})(?:$|[ ._-])", item.get("name", ""))
+        version_match = re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", item.get("name", ""))
+        steam_appid = ""
+        for store in (stores or {}).get("results", []):
+            if str(store.get("store_id")) == "1":
+                match = re.search(r"/app/(\d+)", store.get("url_en") or store.get("url") or "")
+                if match:
+                    steam_appid = match.group(1)
+                    break
         return {
             "title": item.get("name", ""),
             "alias": "",
             "cover_url": item.get("background_image", ""),
             "screenshots": json.dumps(screenshots),
-            "version": version_match.group(1) if version_match else "",
+            "version": version_match.group(0) if version_match else "",
             "description": item.get("description_raw", "") or "",
             "developer": developers,
             "publisher": publishers,
@@ -70,4 +86,5 @@ class RawgClient:
             "series": "",
             "source_type": "rawg",
             "source_id": str(item.get("id", "")),
+            "steam_appid": steam_appid,
         }

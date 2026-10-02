@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..database import SessionLocal, get_db
-from ..models import Game, SystemConfig
+from ..models import AsyncTask, Game, SystemConfig
 from ..task_manager import task_manager
 
 router = APIRouter(prefix="/api", tags=["downloads"])
@@ -76,13 +76,13 @@ async def download_to_pc(game_id: int, db: AsyncSession = Depends(get_db)):
 
 def _copy(source: Path, target: Path, task: dict):
     files = [item for item in source.rglob("*") if item.is_file()] if source.is_dir() else [source]
-    task["total_files"] = len(files)
+    task_manager.update_progress(task, total_files=len(files))
     target.mkdir(parents=True, exist_ok=False)
     for file in files:
         destination = target / file.relative_to(source) if source.is_dir() else target / file.name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(file, destination)
-        task["copied_files"] += 1
+        task_manager.update_progress(task, copied_files=task["copied_files"] + 1)
 
 
 async def _transfer(game_id: int, target_subdir: str, task: dict):
@@ -102,7 +102,7 @@ async def _transfer(game_id: int, target_subdir: str, task: dict):
         while target.exists():
             target = root / f"{name}_{index}"
             index += 1
-        task["target_path"] = str(target)
+        task_manager.update_progress(task, target_path=str(target))
         await asyncio.to_thread(_copy, source, target, task)
         task_manager.complete(task, f"转存完成：{target}")
     except Exception as exc:
@@ -117,15 +117,19 @@ async def transfer_to_local(game_id: int, payload: TransferRequest, db: AsyncSes
     if game.resource_type != "nas_cloud":
         raise HTTPException(400, "仅 NAS 挂载云盘资源支持转存")
     _safe_path(game)
-    task = task_manager.create("等待转存到 NAS 本地")
-    task.update({"game_id": game_id, "copied_files": 0, "total_files": 0, "error": "", "target_path": ""})
+    task = task_manager.create("等待转存到 NAS 本地", task_type="transfer", game_id=game_id)
     asyncio.create_task(_transfer(game_id, payload.target_subdir, task))
     return task
 
 
 @router.get("/downloads/transfer/{task_id}")
 async def transfer_status(task_id: str):
-    task = task_manager.get(task_id)
-    if not task or "copied_files" not in task:
+    async with SessionLocal() as db:
+        row = await db.get(AsyncTask, task_id)
+        if not row or row.task_type != "transfer":
+            raise HTTPException(404, "转存任务不存在")
+        task = {key: getattr(row, key) for key in ("id", "status", "message", "started_at", "finished_at", "task_type", "game_id", "target_path", "copied_files", "total_files")}
+    if not task:
         raise HTTPException(404, "转存任务不存在")
+    task_manager.tasks[task_id] = task
     return task

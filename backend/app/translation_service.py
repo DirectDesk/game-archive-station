@@ -48,26 +48,35 @@ class TranslationService:
                 parts = [part.strip() for part in value.split(",")]
                 result[field] = ", ".join([await self.translate(part, category or None) for part in parts])
             else:
-                result[field] = await self.translate(value, category or None)
+                if field == "description" and len(value) > 500:
+                    chunks = [value[index:index + 500] for index in range(0, len(value), 500)]
+                    result[field] = "".join([await self.translate(chunk, category or None) for chunk in chunks])
+                else:
+                    result[field] = await self.translate(value, category or None)
         return result
 
-    async def translate_rawg_metadata(self, db: AsyncSession, metadata: dict) -> dict:
+    async def translate_metadata(self, db: AsyncSession, metadata: dict) -> dict:
         original = {key: metadata.get(key, "") for key in ("title", "alias", "description", "developer", "publisher", "tags", "series")}
         metadata["original_data"] = json.dumps(original, ensure_ascii=False)
+        config = await db.get(SystemConfig, 1)
+        if not config or not config.auto_translate:
+            return metadata
+        await self.load(db)
+        translated = await self.translate_fields(metadata, {"title": "game_title", "description": "", "tags": "tag"})
+        return translated
+
+    async def translate_rawg_metadata(self, db: AsyncSession, metadata: dict) -> dict:
+        metadata = await self.translate_metadata(db, metadata)
         title = metadata.get("title", "")
-        version_match = re.search(r"(?i)(?:^|[ ._-])(v\d+(?:\.\d+){1,3})(?:$|[ ._-])", title)
-        metadata.setdefault("version", version_match.group(1) if version_match else "")
+        version_match = re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", title)
+        metadata.setdefault("version", version_match.group(0) if version_match else "")
         # 明确游戏本地化名称优先，避免机器翻译遗漏标点/语义。
         title_fixes = {"AI*Shoujo": "AI*少女", "AI＊Shoujo": "AI＊少女", "Magical Girl Witch Trial": "魔法少女的魔女审判"}
         normalized = re.sub(r"[._]+", " ", re.sub(r"(?i)\bv\d+(?:\.\d+){1,3}\b", "", title)).strip()
         if title in title_fixes or normalized.casefold() in {key.casefold() for key in title_fixes}:
             metadata["title"] = next(value for key, value in title_fixes.items() if key.casefold() in {title.casefold(), normalized.casefold()})
-        config = await db.get(SystemConfig, 1)
-        if not config or not config.auto_translate:
-            return metadata
-        await self.load(db)
-        original_title = title
-        translated = await self.translate_fields(metadata, {"title": "game_title", "description": "", "tags": "tag"})
+        original_title = json.loads(metadata.get("original_data", "{}")).get("title", title)
+        translated = metadata
         if title in title_fixes or normalized.casefold() in {key.casefold() for key in title_fixes}:
             translated["title"] = metadata["title"]
         if original_title and not any("\u4e00" <= char <= "\u9fff" for char in original_title) and not translated.get("alias"):

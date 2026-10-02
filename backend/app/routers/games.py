@@ -1,16 +1,19 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+import json
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
+from ..clients.rawg_client import RawgClient
+from ..cover_service import cache_cover
 from ..database import get_db
-from ..models import Game
+from ..models import Game, SystemConfig
 from ..schemas import GameCreate, GameOut, GameUpdate, RefreshMetadataTaskOut
-from ..services import refresh_rawg_game_metadata
+from ..services import fetch_game_screenshots, refresh_game_metadata
 from ..task_manager import task_manager
 
 router = APIRouter(prefix="/api/games", tags=["games"])
@@ -89,29 +92,159 @@ async def upload_cover(game_id: int, file: UploadFile = File(...), db: AsyncSess
         raise HTTPException(415, "封面仅支持 JPG 或 PNG 格式")
     cover_dir = settings.data_dir / "covers"
     cover_dir.mkdir(parents=True, exist_ok=True)
-    path = cover_dir / f"{game_id}_{Path(file.filename or 'cover.jpg').name}"
+    path = cover_dir / f"{game_id}_custom.jpg"
     path.write_bytes(await file.read())
     game.cover_url = f"/data/covers/{path.name}"
+    game.cover_source = "custom"
+    await db.commit()
+    await db.refresh(game)
+    return game
+
+
+@router.post("/{game_id}/cover-source", response_model=GameOut)
+async def change_cover_source(
+    game_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "游戏不存在")
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+        source = payload.get("source")
+        file = None
+    else:
+        form = await request.form()
+        source = form.get("source")
+        file = form.get("file")
+    allowed = {"auto", "steam", "vndb", "dlsite", "rawg", "custom"}
+    if source not in allowed:
+        raise HTTPException(422, "无效的封面来源")
+
+    try:
+        metadata = json.loads(game.original_data or "{}")
+        if not isinstance(metadata, dict):
+            metadata = {}
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    urls = metadata.get("cover_urls", {})
+    if not isinstance(urls, dict):
+        urls = {}
+    existing_source = game.cover_source or game.source_type
+    if game.cover_url.startswith(("http://", "https://")) and existing_source != "custom":
+        urls.setdefault(existing_source, game.cover_url)
+
+    if source == "auto":
+        config = await db.get(SystemConfig, 1)
+        try:
+            priority = json.loads(config.cover_source_priority if config else "[]")
+        except (TypeError, json.JSONDecodeError):
+            priority = []
+        source = next((item for item in priority if item in allowed - {"auto", "custom"} and (
+            (item == "steam" and bool(game.steam_appid)) or
+            (item in urls and bool(urls[item])) or
+            (item == game.source_type and bool(game.cover_url))
+        )), "")
+        if not source:
+            raise HTTPException(422, "没有可用的封面来源")
+
+    if source == "custom":
+        if not file or (file.content_type or "") not in {"image/jpeg", "image/png"}:
+            raise HTTPException(415, "自定义封面仅支持 JPG 或 PNG 格式")
+        cover_dir = settings.data_dir / "covers"
+        cover_dir.mkdir(parents=True, exist_ok=True)
+        path = cover_dir / f"{game_id}_custom.jpg"
+        path.write_bytes(await file.read())
+        cover_url = f"/data/covers/{path.name}"
+    else:
+        metadata["cover_urls"] = urls
+        game.original_data = json.dumps(metadata, ensure_ascii=False)
+        cover_url = urls.get(source, "")
+        if source == "steam" and game.steam_appid:
+            cover_url = RawgClient.steam_cover_url(game.steam_appid)
+        elif source == existing_source and game.cover_url and not game.cover_url.startswith("/data/covers/"):
+            cover_url = game.cover_url
+        if not cover_url:
+            raise HTTPException(422, f"没有可用的 {source} 封面")
+        try:
+            cover_url = await cache_cover(game.id, cover_url, source)
+        except Exception as exc:
+            raise HTTPException(502, f"封面下载失败：{exc}") from exc
+    game.cover_url = cover_url
+    game.cover_source = source
+    await db.commit()
+    await db.refresh(game)
+    return game
+
+
+@router.get("/{game_id}/screenshots/fetch", response_model=GameOut)
+async def fetch_screenshots(game_id: int, source: str = "", db: AsyncSession = Depends(get_db)):
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "游戏不存在")
+    try:
+        existing = json.loads(game.screenshots or "[]")
+    except json.JSONDecodeError:
+        existing = []
+    if existing and not source:
+        return game
+    config = await db.get(SystemConfig, 1)
+    if not config:
+        config = SystemConfig(id=1)
+        db.add(config)
+        await db.flush()
+    await fetch_game_screenshots(game, config, source)
     await db.commit()
     await db.refresh(game)
     return game
 
 
 @router.post("/{game_id}/screenshots", response_model=GameOut)
-async def upload_screenshot(game_id: int, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def upload_screenshot(game_id: int, files: list[UploadFile] = File(...), db: AsyncSession = Depends(get_db)):
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(404, "游戏不存在")
-    if (file.content_type or "") not in {"image/jpeg", "image/png"}:
+    if any((file.content_type or "") not in {"image/jpeg", "image/png"} for file in files):
         raise HTTPException(415, "截图仅支持 JPG 或 PNG 格式")
     directory = settings.data_dir / "screenshots"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{game_id}_{Path(file.filename or 'screenshot.jpg').name}"
-    path.write_bytes(await file.read())
-    import json
-    values = json.loads(game.screenshots or "[]")
-    values.append(f"/data/screenshots/{path.name}")
+    try:
+        values = json.loads(game.screenshots or "[]")
+    except json.JSONDecodeError:
+        values = []
+    for file in files:
+        suffix = ".png" if file.content_type == "image/png" else ".jpg"
+        path = directory / f"{game_id}_custom_{len(values)}{suffix}"
+        path.write_bytes(await file.read())
+        values.append(f"/data/screenshots/{path.name}")
     game.screenshots = json.dumps(values)
+    game.screenshot_source = "custom"
+    await db.commit()
+    await db.refresh(game)
+    return game
+
+
+@router.delete("/{game_id}/screenshots/{index}", response_model=GameOut)
+async def delete_screenshot(game_id: int, index: int, db: AsyncSession = Depends(get_db)):
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "游戏不存在")
+    try:
+        values = json.loads(game.screenshots or "[]")
+    except json.JSONDecodeError:
+        values = []
+    if index < 0 or index >= len(values):
+        raise HTTPException(404, "截图不存在")
+    url = values.pop(index)
+    if url.startswith("/data/screenshots/"):
+        path = (settings.data_dir / "screenshots" / Path(url).name).resolve()
+        if path.parent == (settings.data_dir / "screenshots").resolve() and path.exists():
+            path.unlink()
+    game.screenshots = json.dumps(values)
+    if not values:
+        game.screenshot_source = ""
     await db.commit()
     await db.refresh(game)
     return game
@@ -122,36 +255,14 @@ async def refresh_metadata(game_id: int, db: AsyncSession = Depends(get_db)):
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(404, "游戏不存在")
-    if game.source_type != "rawg" or not game.source_id:
-        raise HTTPException(422, "仅支持刷新具有 RAWG 数据源 ID 的游戏")
+    if game.source_type not in {"rawg", "vndb"} or not game.source_id:
+        raise HTTPException(422, "仅支持刷新具有 RAWG 或 VNDB 数据源 ID 的游戏")
     last_refresh = task_manager.game_refreshes.get(game_id)
     if last_refresh and datetime.utcnow() - last_refresh < timedelta(seconds=60):
         raise HTTPException(429, "请在 60 秒后再次刷新元数据")
     task_manager.game_refreshes[game_id] = datetime.utcnow()
-    task = task_manager.create("等待刷新 RAWG 元数据")
+    task = task_manager.create(f"等待刷新 {game.source_type.upper()} 元数据")
     task["result_game_id"] = game_id
 
-    task_manager.run(task, refresh_rawg_game_metadata(game_id))
+    task_manager.run(task, refresh_game_metadata(game_id))
     return task
-
-
-@router.get("/{game_id}/resource")
-async def open_resource(game_id: int, db: AsyncSession = Depends(get_db)):
-    game = await db.get(Game, game_id)
-    if not game or not game.resource_url:
-        raise HTTPException(404, "该游戏没有资源")
-    if game.resource_type == "web_link":
-        return RedirectResponse(game.resource_url)
-    if game.resource_type in {"nas_cloud", "nas_local"}:
-        root = settings.scan_root if game.resource_type == "nas_cloud" else settings.local_game_root
-        path = Path(game.resource_url).resolve()
-        try:
-            path.relative_to(root.resolve())
-        except ValueError:
-            raise HTTPException(400, "资源路径不在对应的 NAS 挂载目录内")
-        if not path.exists():
-            raise HTTPException(404, "NAS 文件不存在或路径不可访问")
-        if path.is_dir():
-            return {"path": str(path), "files": [{"name": child.name, "is_dir": child.is_dir()} for child in sorted(path.iterdir())]}
-        return FileResponse(path, filename=path.name)
-    raise HTTPException(400, "资源类型无效")

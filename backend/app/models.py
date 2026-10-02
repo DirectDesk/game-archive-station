@@ -13,7 +13,10 @@ class Game(Base):
     title: Mapped[str] = mapped_column(String(255), index=True)
     alias: Mapped[str] = mapped_column(String(500), default="")
     cover_url: Mapped[str] = mapped_column(String(1000), default="")
+    cover_source: Mapped[str] = mapped_column(String(20), default="")
+    steam_appid: Mapped[str] = mapped_column(String(20), default="")
     screenshots: Mapped[str] = mapped_column(Text, default="")
+    screenshot_source: Mapped[str] = mapped_column(String(20), default="")
     original_data: Mapped[str] = mapped_column(Text, default="")
     description: Mapped[str] = mapped_column(Text, default="")
     developer: Mapped[str] = mapped_column(String(255), default="")
@@ -49,6 +52,11 @@ class SystemConfig(Base):
     tencent_secret_id: Mapped[str] = mapped_column(String(200), default="")
     tencent_secret_key: Mapped[str] = mapped_column(String(200), default="")
     tencent_region: Mapped[str] = mapped_column(String(50), default="ap-guangzhou")
+    metadata_source_priority: Mapped[str] = mapped_column(String(200), default='["rawg","vndb","dlsite"]')
+    cover_source_priority: Mapped[str] = mapped_column(String(200), default='["steam","vndb","dlsite","rawg"]')
+    screenshot_source_priority: Mapped[str] = mapped_column(String(200), default='["rawg","steam","vndb","dlsite"]')
+    scan_fetch_screenshots: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_screenshots: Mapped[int] = mapped_column(Integer, default=5)
 
 
 class TranslationGlossary(Base):
@@ -61,3 +69,18 @@ class TranslationGlossary(Base):
     category: Mapped[str] = mapped_column(String(50), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AsyncTask(Base):
+    __tablename__ = "async_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    message: Mapped[str] = mapped_column(String(1000), default="")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    task_type: Mapped[str] = mapped_column(String(50), default="")
+    game_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_path: Mapped[str] = mapped_column(String(2000), default="")
+    copied_files: Mapped[int] = mapped_column(Integer, default=0)
+    total_files: Mapped[int] = mapped_column(Integer, default=0)

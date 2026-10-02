@@ -13,7 +13,6 @@ from ..schemas import SettingsUpdate
 from ..translation_service import translation_service
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
-SECRET_FIELDS = {"rawg_api_key", "tencent_secret_id", "tencent_secret_key"}
 
 
 async def _config(db: AsyncSession) -> SystemConfig:
@@ -28,8 +27,7 @@ async def _config(db: AsyncSession) -> SystemConfig:
 
 def _output(config: SystemConfig) -> dict:
     data = {column.name: getattr(config, column.name) for column in config.__table__.columns}
-    for field in SECRET_FIELDS:
-        data[field] = "******" if data[field] else ""
+    for field in {"rawg_api_key", "tencent_secret_id", "tencent_secret_key"}:
         data[f"{field}_configured"] = bool(getattr(config, field))
     return data
 
@@ -43,8 +41,6 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
 async def update_settings(payload: SettingsUpdate, db: AsyncSession = Depends(get_db)):
     config = await _config(db)
     for field, value in payload.model_dump(exclude_none=True).items():
-        if field in SECRET_FIELDS and not value:
-            continue
         setattr(config, field, value)
     await db.commit()
     await db.refresh(config)

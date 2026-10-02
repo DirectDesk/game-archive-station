@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from .config import settings
 from .database import SessionLocal
 from .models import Game, SystemConfig
 from .translation_service import translation_service
+from .services import fetch_game_screenshots
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,7 @@ class LibraryScanner:
                 await db.refresh(config)
             return config
 
-    async def _create_game_from_folder(self, folder: Path, resource_type: str) -> bool:
+    async def _create_game_from_folder(self, folder: Path, resource_type: str, config: SystemConfig) -> bool:
         async with SessionLocal() as db:
             folder_path = str(folder.absolute())
             exists = await db.scalar(select(Game.id).where(Game.resource_url == folder_path))
@@ -60,15 +62,20 @@ class LibraryScanner:
                 logger.exception("RAWG 搜索失败，创建基础游戏记录：%s", folder_path)
                 candidates = []
             if not candidates:
-                db.add(Game(
+                game = Game(
                     title=folder.name,
+                    version=(re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", folder.name) or [""])[0],
                     alias="",
                     source_type="custom",
                     source_id="",
                     resource_type=resource_type,
                     resource_url=folder_path,
                     play_status="favorite",
-                ))
+                )
+                db.add(game)
+                if config.scan_fetch_screenshots:
+                    await db.flush()
+                    await fetch_game_screenshots(game, config)
                 await db.commit()
                 logger.info("扫描发现游戏目录（未匹配元数据，待手动补充）：%s", folder_path)
                 return True
@@ -82,9 +89,16 @@ class LibraryScanner:
                     "source_type": "custom",
                     "source_id": "",
                 }
-            metadata = await translation_service.translate_rawg_metadata(db, metadata)
+            version_match = re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", folder.name)
+            if version_match and not metadata.get("version"):
+                metadata["version"] = version_match.group(0)
+            metadata = await translation_service.translate_metadata(db, metadata)
             metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite"})
-            db.add(Game(**metadata))
+            game = Game(**metadata)
+            db.add(game)
+            if config.scan_fetch_screenshots:
+                await db.flush()
+                await fetch_game_screenshots(game, config)
             await db.commit()
             logger.info("扫描发现游戏目录（已匹配元数据）：%s", folder_path)
             return True
@@ -120,7 +134,7 @@ class LibraryScanner:
                 task["logs"] = (task["logs"] + [f"已读取：{directory}"])[-20:]
                 # 叶子目录视为游戏目录，避免读取其中的游戏文件。
                 if not children and directory not in {root for root, _ in available_roots}:
-                    if await self._create_game_from_folder(directory, resource_type):
+                    if await self._create_game_from_folder(directory, resource_type, config):
                         task["discovered_games"] += 1
                 else:
                     stack.extend((child, resource_type) for child in children)

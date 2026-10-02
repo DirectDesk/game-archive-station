@@ -8,7 +8,10 @@ class GameBase(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     alias: str = ""
     cover_url: str = ""
+    cover_source: str = ""
+    steam_appid: str = ""
     screenshots: str = ""
+    screenshot_source: str = ""
     original_data: str = ""
     description: str = ""
     developer: str = ""
@@ -118,3 +121,8 @@ class SettingsUpdate(BaseModel):
     tencent_secret_id: str | None = Field(default=None, max_length=200)
     tencent_secret_key: str | None = Field(default=None, max_length=200)
     tencent_region: str | None = Field(default=None, max_length=50)
+    metadata_source_priority: str | None = None
+    cover_source_priority: str | None = None
+    screenshot_source_priority: str | None = None
+    scan_fetch_screenshots: bool | None = None
+    max_screenshots: int | None = None
