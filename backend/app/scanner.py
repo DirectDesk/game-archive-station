@@ -113,13 +113,11 @@ class LibraryScanner:
                     logger.exception("VNDB fallback 搜索失败：%s", folder_path)
                     vndb_results = []
                 if vndb_results:
-                    # vndb 结果也按相似度过滤（标题或别名）
-                    for item in vndb_results:
-                        if self._title_match(search_name, item.get("title", "")) or \
-                           self._title_match(search_name, item.get("alias", "")):
-                            candidates = [item]
-                            source_type = "vndb"
-                            break
+                    # vndb 标题多为日文/罗马音，与英文搜索词单词重叠率低，不做相似度校验；
+                    # vndb 搜索 API 本身按相关性排序，第一个结果通常即目标游戏。
+                    candidates = [vndb_results[0]]
+                    source_type = "vndb"
+                    logger.info("VNDB fallback 匹配成功：%s -> %s (%s)", folder.name, vndb_results[0].get("title",""), vndb_results[0].get("source_id",""))
             if not candidates:
                 game = Game(
                     title=folder.name,
