@@ -65,8 +65,16 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
                     candidates["rawg"] = rawg_shots
         except Exception:
             logger.warning("VNDB 游戏从 RAWG 补截图失败：%s", game.title, exc_info=True)
-    if game.source_type == "dlsite" and game.source_id:
-        candidates["dlsite"] = await _dlsite_screenshots(game.source_id)
+    if game.source_type == "dlsite":
+        # 优先用扫描时已存入的 API 截图 URL（dlsite_client._map_detail 已填充）
+        try:
+            existing_shots = json.loads(game.screenshots or "[]")
+        except json.JSONDecodeError:
+            existing_shots = []
+        if existing_shots:
+            candidates["dlsite"] = existing_shots
+        elif game.source_id:
+            candidates["dlsite"] = await _dlsite_screenshots(game.source_id)
 
     logger.info("截图候选：rawg=%d, vndb=%d, dlsite=%d",
                 len(candidates.get("rawg", [])), len(candidates.get("vndb", [])), len(candidates.get("dlsite", [])))
@@ -79,7 +87,11 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
         if not urls:
             continue
         cached = []
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+        dl_headers = {"User-Agent": "Mozilla/5.0"}
+        # DLSite 图片有防盗链，需带 Referer 才能下载
+        if any("dlsite.jp" in u for u in urls):
+            dl_headers["Referer"] = "https://www.dlsite.com/"
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=dl_headers) as client:
             for index, url in enumerate(urls):
                 if not url:
                     continue
