@@ -29,10 +29,28 @@ async function removeGame() { if (active.value && confirm('确认删除此游戏
 async function scrapeSearch() { searching.value=true; try { searchResults.value=await api(`/api/metadata/search?${new URLSearchParams(scrape)}`) } catch(e) { error.value=e.message } finally { searching.value=false } }
 function choose(item) { Object.assign(form, {...blank(), ...item, resource_type:'none', play_status:'favorite'}); searchResults.value=[] }
 function downloadToPc() { window.location.href=`/api/games/${active.value.id}/download-to-pc` }
-async function copyResourcePath() { try { await navigator.clipboard.writeText(form.resource_url); alert('已复制，请在 NAS 文件管理中打开') } catch { error.value='复制路径失败' } }
+async function copyToClipboard(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            return;
+        }
+        // HTTP 环境降级：用临时 textarea + execCommand
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand('copy');
+        } finally {
+            document.body.removeChild(ta);
+        }
+    }
+    async function copyResourcePath() { try { await copyToClipboard(form.resource_url); alert('已复制，请在 NAS 文件管理中打开') } catch(e) { error.value='复制路径失败：' + e.message } }
 async function startTransfer() { try { transferTask.value=await api(`/api/games/${active.value.id}/transfer-to-local`,{method:'POST',body:JSON.stringify({target_subdir:transferSubdir.value})}); transferTask.value.game_id=active.value.id; localStorage.setItem('game-archive-transfer-task',JSON.stringify(transferTask.value)); showTransfer.value=false; pollTransfer() } catch(e) { error.value=e.message } }
 async function pollTransfer() { if (!transferTask.value) return; try { const latest=await api(`/api/downloads/transfer/${transferTask.value.id}`); transferTask.value=latest; localStorage.setItem('game-archive-transfer-task',JSON.stringify(latest)); if (['pending','running'].includes(latest.status)) setTimeout(()=>{ if (transferTask.value?.id === latest.id) pollTransfer() },2000) } catch(e) { error.value=e.message } }
-async function copyPath(path) { try { await navigator.clipboard.writeText(path); alert('已复制，请在 NAS 文件管理中打开') } catch { error.value='复制路径失败' } }
+async function copyPath(path) { try { await copyToClipboard(path); alert('已复制，请在 NAS 文件管理中打开') } catch(e) { error.value='复制路径失败：' + e.message } }
 async function changeCoverSource(event) { const source=event.target.value; coverSource.value=source; if (!active.value || source === 'auto' && !active.value) return; if (source === 'custom') return; try { const result=await api(`/api/games/${active.value.id}/cover-source`,{method:'POST',body:JSON.stringify({source})}); Object.assign(form,result); await load() } catch(e) { error.value=e.message } }
 async function uploadCover(event) { const file=event.target.files[0]; event.target.value=''; if (!active.value || !file) return; const data=new FormData(); data.append('source','custom'); data.append('file',file); const result=await fetch(`/api/games/${active.value.id}/cover-source`,{method:'POST',body:data}); if(!result.ok) error.value='封面上传失败'; else { const game=await result.json(); Object.assign(form,game); coverSource.value='custom'; await load() } }
 async function changeScreenshotSource(event) { const source=event.target.value; if (source !== 'custom') { if (!active.value) return; try { const result=await api(`/api/games/${active.value.id}/screenshots/fetch?source=${encodeURIComponent(source)}`); Object.assign(form,result); await load() } catch(e) { error.value=e.message } } }
