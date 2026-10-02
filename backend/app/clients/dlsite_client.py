@@ -138,12 +138,9 @@ class DlsiteClient:
         # 封面：image_main.url
         cover_url = DlsiteClient._full_url((item.get("image_main") or {}).get("url", ""))
 
-        # 截图：image_samples[].url（最多取10张）
+        # 截图：DLSite API 返回的 image_samples URL 对旧游戏常返回 404（DLSite 清理了旧截图存储），
+        # 暂不存入 screenshots，避免前端显示裂开的图片；后续可从详情页或其他数据源补截图。
         screenshots = []
-        for sample in item.get("image_samples", []):
-            url = DlsiteClient._full_url(sample.get("url", ""))
-            if url:
-                screenshots.append(url)
 
         version_match = re.search(
             r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", title
