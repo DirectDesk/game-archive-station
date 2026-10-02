@@ -33,9 +33,9 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
         metadata = {}
     for source in priority:
         tags = metadata.get(f"{source}_tags", "")
-        # fallback：original_data 中无来源标签，但游戏本身就是该来源且有标签
-        if not tags and game.source_type == source and game.tags:
-            tags = game.tags
+        # fallback：original_data 中无来源标签，但游戏本身就是该来源，从 original_data.tags 取
+        if not tags and game.source_type == source:
+            tags = metadata.get("tags", "")
         if tags:
             game.tags = tags
             game.tag_source = source
