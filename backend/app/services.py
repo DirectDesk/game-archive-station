@@ -149,7 +149,16 @@ async def get_vndb_detail(source_id: str) -> dict:
             release_date = date.fromisoformat(released) if released else None
         except (ValueError, TypeError):
             release_date = None
-        return {"source_type": "vndb", "source_id": value.get("id", ""), "title": value.get("title", ""), "alias": value.get("alttitle", ""), "cover_url": (value.get("image") or {}).get("url", ""), "description": value.get("description", ""), "developer": ", ".join(x.get("name", "") for x in value.get("developers", [])), "publisher": "", "release_date": release_date, "rating": value.get("rating"), "tags": ", ".join(x.get("name", "") for x in value.get("tags", [])), "series": "", "screenshots": "", "version": ""}
+        vndb_title = value.get("title", "")
+        vndb_alttitle = value.get("alttitle", "")
+        # VNDB 的 title 是罗马音，alttitle 是日文原名；优先用日文原名作为标题（翻译更准确），罗马音存为别名
+        if vndb_alttitle and vndb_alttitle != vndb_title:
+            display_title = vndb_alttitle
+            display_alias = vndb_title
+        else:
+            display_title = vndb_title
+            display_alias = vndb_alttitle
+        return {"source_type": "vndb", "source_id": value.get("id", ""), "title": display_title, "alias": display_alias, "cover_url": (value.get("image") or {}).get("url", ""), "description": value.get("description", ""), "developer": ", ".join(x.get("name", "") for x in value.get("developers", [])), "publisher": "", "release_date": release_date, "rating": value.get("rating"), "tags": ", ".join(x.get("name", "") for x in value.get("tags", [])), "series": "", "screenshots": "", "version": ""}
 
 
 async def refresh_game_metadata(game_id: int) -> None:
