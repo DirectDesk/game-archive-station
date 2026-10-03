@@ -37,11 +37,22 @@ async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_typ
 
 
 @router.get("/all-tags")
-async def all_tags(db: AsyncSession = Depends(get_db)):
+async def all_tags(source: str = "all", db: AsyncSession = Depends(get_db)):
+    import json as _json
     counts: dict[str, int] = {}
-    for value in await db.scalars(select(Game.tags).where(Game.tags != "")):
-        for tag in {item.strip() for item in value.split(",") if item.strip()}:
-            counts[tag] = counts.get(tag, 0) + 1
+    if source == "all":
+        for value in await db.scalars(select(Game.tags).where(Game.tags != "")):
+            for tag in {item.strip() for item in value.split(",") if item.strip()}:
+                counts[tag] = counts.get(tag, 0) + 1
+    else:
+        for sd in await db.scalars(select(Game.source_data).where(Game.source_data != "{}")):
+            try:
+                data = _json.loads(sd)
+                tags_str = data.get(source, {}).get("tags", "") if isinstance(data.get(source), dict) else ""
+            except Exception:
+                tags_str = ""
+            for tag in {item.strip() for item in tags_str.split(",") if item.strip()}:
+                counts[tag] = counts.get(tag, 0) + 1
     return [{"tag": tag, "count": count} for tag, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
 
 

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os as _os
 import os
 import re
 from datetime import datetime
@@ -280,7 +281,16 @@ class LibraryScanner:
                 _sids["steam"] = metadata["steam_appid"]
             metadata["source_data"] = json.dumps(_sd, ensure_ascii=False)
             metadata["source_ids"] = json.dumps(_sids, ensure_ascii=False)
-            metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite"})
+            # 计算文件夹大小
+            _dir_size = 0
+            try:
+                for _root, _dirs, _files in _os.walk(folder_path):
+                    for _f in _files:
+                        try: _dir_size += _os.path.getsize(_os.path.join(_root, _f))
+                        except OSError: pass
+            except Exception:
+                pass
+            metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite", "file_size": _dir_size})
             game = Game(**metadata)
             try:
                 await resolve_tags(game, config)

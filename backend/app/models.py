@@ -36,6 +36,7 @@ class Game(Base):
     source_data: Mapped[str] = mapped_column(Text, default="{}")
     resource_type: Mapped[str] = mapped_column(String(20), default="none")
     resource_url: Mapped[str] = mapped_column(String(2000), default="")
+    file_size: Mapped[int] = mapped_column(Integer, default=0)
     play_status: Mapped[str] = mapped_column(String(20), default="favorite")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())

@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
         await connection.run_sync(Base.metadata.create_all)
         columns = (await connection.execute(text("PRAGMA table_info(games)"))).mappings().all()
         existing_game_columns = {column["name"] for column in columns}
-        for name, definition in {"screenshots": "TEXT DEFAULT ''", "original_data": "TEXT DEFAULT ''", "version": "VARCHAR(100) DEFAULT ''", "cover_source": "VARCHAR(20) DEFAULT ''", "steam_appid": "VARCHAR(20) DEFAULT ''", "screenshot_source": "VARCHAR(20) DEFAULT ''", "source_ids": "TEXT DEFAULT '{}'", "source_data": "TEXT DEFAULT '{}'"}.items():
+        for name, definition in {"screenshots": "TEXT DEFAULT ''", "original_data": "TEXT DEFAULT ''", "version": "VARCHAR(100) DEFAULT ''", "cover_source": "VARCHAR(20) DEFAULT ''", "steam_appid": "VARCHAR(20) DEFAULT ''", "screenshot_source": "VARCHAR(20) DEFAULT ''", "source_ids": "TEXT DEFAULT '{}'", "source_data": "TEXT DEFAULT '{}'", "file_size": "INTEGER DEFAULT 0"}.items():
             if name not in existing_game_columns:
                 await connection.execute(text(f"ALTER TABLE games ADD COLUMN {name} {definition}"))
         config_columns = (await connection.execute(text("PRAGMA table_info(system_config)"))).mappings().all()
