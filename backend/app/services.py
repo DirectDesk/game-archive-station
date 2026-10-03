@@ -58,7 +58,7 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
                 sd[source] = {}
             sd[source]["tags"] = tags
             game.source_data = json.dumps(sd, ensure_ascii=False, default=str)
-            # 翻译标签
+            # 翻译标签：合并成一句话翻译，利用上下文提高质量
             translated_tags = tags
             if db and config and config.auto_translate and config.translator_type != "none":
                 try:
@@ -66,7 +66,16 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
                     ts = TranslationService()
                     await ts.load(db)
                     parts = [p.strip() for p in tags.split(",") if p.strip()]
-                    translated_parts = [await ts.translate(p, "tag") for p in parts]
+                    # 合并成一句话翻译（用顿号分隔，翻译君对句子翻译质量更高）
+                    combined = "、".join(parts)
+                    translated_combined = await ts.translate(combined, "tag")
+                    # 翻译后按逗号/顿号拆分
+                    import re as _re
+                    translated_parts = [p.strip() for p in _re.split(r'[、,，]', translated_combined) if p.strip()]
+                    # 如果拆分后数量不一致，降级为逐个翻译
+                    if len(translated_parts) != len(parts):
+                        logger.info("标签合并翻译数量不一致(%d vs %d)，降级逐个翻译：%s", len(translated_parts), len(parts), translated_combined[:80])
+                        translated_parts = [await ts.translate(p, "tag") for p in parts]
                     translated_tags = ", ".join(translated_parts)
                 except Exception as e:
                     logger.warning("标签翻译失败 game_id=%s: %s", game.id, e)
