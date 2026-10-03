@@ -268,6 +268,18 @@ class LibraryScanner:
                     orig = {}
                 orig[f"{source_type}_tags"] = metadata["tags"]
                 metadata["original_data"] = json.dumps(orig, ensure_ascii=False)
+            # 构建 source_data/source_ids：主来源数据存入，其他来源待刷新时补充
+            _sd = {}
+            _sids = {}
+            if source_type and source_type != "custom":
+                # 主来源的完整 metadata（翻译后）存入 source_data
+                _sd[source_type] = {k: v for k, v in metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
+                _sids[source_type] = candidates[0].get("source_id", "")
+            # 如果主来源同步到了 steam_appid，补充 steam 来源ID
+            if metadata.get("steam_appid") and "steam" not in _sids:
+                _sids["steam"] = metadata["steam_appid"]
+            metadata["source_data"] = json.dumps(_sd, ensure_ascii=False)
+            metadata["source_ids"] = json.dumps(_sids, ensure_ascii=False)
             metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite"})
             game = Game(**metadata)
             try:
