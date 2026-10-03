@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .clients.rawg_client import RawgClient
 from .clients.steam_client import SteamClient
