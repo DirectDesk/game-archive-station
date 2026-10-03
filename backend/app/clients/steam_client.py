@@ -51,6 +51,7 @@ class SteamClient:
                     "source_type": "steam",
                     "source_id": appid,
                     "title": item.get("name", ""),
+            "english_name": item.get("name", ""),
                     "cover_url": item.get("tiny_image", ""),
                 })
             return results
@@ -135,6 +136,7 @@ class SteamClient:
         original_data = json.dumps({"steam_tags": tags}, ensure_ascii=False)
         return {
             "title": item.get("name", ""),
+            "english_name": item.get("name", ""),
             "alias": "",
             "cover_url": cover_url,
             "screenshots": json.dumps(screenshots, ensure_ascii=False),

@@ -355,18 +355,26 @@ async def refresh_game_metadata(game_id: int) -> None:
                         source_data["steam"] = await get_steam_detail(results[0]["source_id"])
                 elif src == "rawg":
                     rawg_client = RawgClient()
-                    results = await rawg_client.search_games(game.title, page_size=1)
+                    results = await rawg_client.search_games(game.title, page_size=5)
+                    # 过滤非主游戏（Typing/DLC/Demo等）
+                    results = [r for r in results if not re.search(r"(?i)(typing|dlc|demo|trial|soundtrack|ost|art pack)", r.get("title", ""))]
                     if not results:
-                        # 标题搜索没找到时，用 steam_appid 反查
-                        steam_id = source_ids.get("steam") or game.steam_appid
-                        if steam_id:
+                        # 中文名搜索没找到时，用 steam 英文名搜索
+                        steam_eng = source_data.get("steam", {}).get("english_name", "") if isinstance(source_data.get("steam"), dict) else ""
+                        if not steam_eng and "steam" in source_data:
                             try:
-                                steam_rawg = await rawg_client.get_game_by_steam_appid(steam_id)
-                                if steam_rawg:
-                                    results = [steam_rawg]
-                                    logger.info("多来源刷新：game_id=%s, 通过 steam_appid=%s 反查到 rawg=%s", game.id, steam_id, steam_rawg["source_id"])
+                                steam_eng = json.loads(source_data["steam"]).get("english_name", "") if isinstance(source_data["steam"], str) else source_data["steam"].get("english_name", "")
+                            except:
+                                pass
+                        if steam_eng:
+                            try:
+                                eng_results = await rawg_client.search_games(steam_eng, page_size=5)
+                                eng_results = [r for r in eng_results if not re.search(r"(?i)(typing|dlc|demo|trial|soundtrack|ost|art pack)", r.get("title", ""))]
+                                if eng_results:
+                                    results = eng_results
+                                    logger.info("多来源刷新：game_id=%s, 通过 steam 英文名 '%s' 搜索到 rawg=%s", game.id, steam_eng, eng_results[0]["source_id"])
                             except Exception as e:
-                                logger.warning("多来源刷新：game_id=%s, steam_appid 反查 rawg 失败: %s", game.id, e)
+                                logger.warning("多来源刷新：game_id=%s, steam 英文名搜索 rawg 失败: %s", game.id, e)
                     if results:
                         source_ids["rawg"] = results[0]["source_id"]
                         source_data["rawg"] = await rawg_client.get_game_detail(results[0]["source_id"])
