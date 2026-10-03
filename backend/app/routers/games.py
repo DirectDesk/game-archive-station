@@ -57,7 +57,15 @@ async def all_tags(source: str = "all", original: bool = False, page: int = 1, s
                 else:
                     # 译文模式：用术语表翻译
                     from ..translation_service import translation_service as _ts
-                    translated = await _ts.translate(tag, "tag", db)
+                    # 已是中文的标签先查术语表（可能有修正），没有才直接使用，跳过翻译提速
+                    _chinese_count = sum(1 for _ch in tag if "\u4e00" <= _ch <= "\u9fff")
+                    _has_kana = any("\u3040" <= _ch <= "\u309f" or "\u30a0" <= _ch <= "\u30ff" for _ch in tag)
+                    if not _has_kana and _chinese_count / len(tag) > 0.3:
+                        # 中文标签：先查术语表（可能有修正），没有才直接用原文
+                        _cached = _ts.glossary.get((tag, "tag")) or _ts.glossary.get((tag, ""))
+                        translated = _cached if _cached else tag
+                    else:
+                        translated = await _ts.translate(tag, "tag", db)
                     counts[translated] = counts.get(translated, 0) + 1
     elif original:
         # source=all + 原文模式：从所有来源聚合原文标签
