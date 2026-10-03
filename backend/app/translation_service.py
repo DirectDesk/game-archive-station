@@ -45,6 +45,17 @@ class TranslationService:
             return translated
         try:
             result = await self.translator.translate(text)
+            # 质量校验：标签翻译结果异常时保留原文
+            if category == "tag" and result != text:
+                # 1. 长度校验：翻译结果长度 < 原文50%，认为被截断
+                if len(result) < len(text) * 0.5:
+                    logger.info("标签翻译被截断，保留原文：%s -> %s", text, result)
+                    return text
+                # 2. 音译垃圾检测：翻译结果中出现连续的平假名/片假名（中文翻译不应有日文假名）
+                import re as _re
+                if _re.search(r'[\u3040-\u309f\u30a0-\u30ff]{2,}', result):
+                    logger.info("标签翻译含日文假名（音译垃圾），保留原文：%s -> %s", text, result)
+                    return text
             if result != text:
                 logger.info("翻译成功（%s）：%s -> %s", category or "default", text, result)
             else:
