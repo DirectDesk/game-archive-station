@@ -27,13 +27,24 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
         priority = ["steam", "rawg", "vndb", "dlsite"]
     if requested_source:
         priority = [requested_source]
+    # 优先从 source_data 取，fallback 到 original_data
+    try:
+        source_data = json.loads(game.source_data or "{}")
+    except json.JSONDecodeError:
+        source_data = {}
     try:
         metadata = json.loads(game.original_data or "{}")
     except json.JSONDecodeError:
         metadata = {}
     for source in priority:
-        tags = metadata.get(f"{source}_tags", "")
-        # fallback：original_data 中无来源标签，但游戏本身就是该来源，从 original_data.tags 取
+        tags = ""
+        # 1. 优先从 source_data[source].tags 取
+        if source in source_data:
+            tags = source_data[source].get("tags", "")
+        # 2. fallback 到 original_data 的 {source}_tags
+        if not tags:
+            tags = metadata.get(f"{source}_tags", "")
+        # 3. 再 fallback：游戏本身就是该来源，从 original_data.tags 取
         if not tags and game.source_type == source:
             tags = metadata.get("tags", "")
         if tags:
@@ -61,14 +72,28 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
         metadata = json.loads(game.original_data or "{}")
     except json.JSONDecodeError:
         pass
+    source_data = {}
+    try:
+        source_data = json.loads(game.source_data or "{}")
+    except json.JSONDecodeError:
+        pass
     candidates: dict[str, list[str]] = {}
-    if metadata.get("screenshots"):
-        candidates["rawg"] = metadata["screenshots"]
-    else:
-        try:
-            candidates["rawg"] = json.loads(game.screenshots or "[]") if game.source_type == "rawg" else []
-        except json.JSONDecodeError:
-            candidates["rawg"] = []
+    # 优先从 source_data 取各来源的截图 URL
+    for _src in ["rawg", "steam", "vndb", "dlsite"]:
+        if _src in source_data and source_data[_src].get("screenshots"):
+            try:
+                candidates[_src] = json.loads(source_data[_src]["screenshots"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    # fallback：从 original_data 或 game.screenshots 取
+    if not candidates.get("rawg"):
+        if metadata.get("screenshots"):
+            candidates["rawg"] = metadata["screenshots"]
+        else:
+            try:
+                candidates["rawg"] = json.loads(game.screenshots or "[]") if game.source_type == "rawg" else []
+            except json.JSONDecodeError:
+                candidates["rawg"] = []
     steam_appid = game.steam_appid or metadata.get("steam_appid", "")
     if not steam_appid and game.source_type == "rawg" and game.source_id:
         try:
