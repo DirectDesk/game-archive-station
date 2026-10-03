@@ -57,7 +57,7 @@ class SteamClient:
             return results
 
     async def get_game_detail(self, appid: str) -> dict:
-        """Steam appdetails 反查，返回完整元数据（中文）。"""
+        """Steam appdetails 反查，返回完整元数据（中文），english_name 为英文原名。"""
         await self._throttle()
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             response = await client.get(
@@ -70,7 +70,24 @@ class SteamClient:
             app_data = data.get(str(appid), {})
             if not app_data.get("success"):
                 raise ValueError(f"Steam appdetails 返回失败: appid={appid}")
-            return self._map_detail(app_data.get("data", {}), appid)
+            result = self._map_detail(app_data.get("data", {}), appid)
+            # 额外调用一次英文 appdetails 获取英文原名（l=schinese 时 name 是中文）
+            try:
+                await self._throttle()
+                eng_response = await client.get(
+                    self.detail_url,
+                    params={"appids": appid, "cc": "us"},
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                eng_data = eng_response.json()
+                eng_app = eng_data.get(str(appid), {})
+                if eng_app.get("success"):
+                    eng_name = (eng_app.get("data") or {}).get("name", "")
+                    if eng_name:
+                        result["english_name"] = eng_name
+            except Exception:
+                pass  # 英文名称获取失败时保留中文 name
+            return result
 
     @staticmethod
     def library_cover_url(appid: str) -> str:
