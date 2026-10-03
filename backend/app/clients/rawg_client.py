@@ -37,6 +37,27 @@ class RawgClient:
                 for item in response.json().get("results", [])
             ]
 
+    async def get_game_by_steam_appid(self, steam_appid: str) -> dict | None:
+        """通过 Steam AppID 反查 RAWG 游戏"""
+        if not steam_appid:
+            return None
+        key = await self._api_key()
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                f"{self.base_url}/games",
+                params={"key": key, "steam_appid": steam_appid, "page_size": 1},
+            )
+            response.raise_for_status()
+            results = response.json().get("results", [])
+            if results:
+                return {
+                    "source_type": "rawg",
+                    "source_id": str(results[0]["id"]),
+                    "title": results[0].get("name", ""),
+                    "cover_url": results[0].get("background_image", ""),
+                }
+            return None
+
     async def get_game_detail(self, rawg_id: str) -> dict:
         key = await self._api_key()
         async with httpx.AsyncClient(timeout=15) as client:

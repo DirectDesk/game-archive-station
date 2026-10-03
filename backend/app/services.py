@@ -354,10 +354,22 @@ async def refresh_game_metadata(game_id: int) -> None:
                         source_ids["steam"] = results[0]["source_id"]
                         source_data["steam"] = await get_steam_detail(results[0]["source_id"])
                 elif src == "rawg":
-                    results = await RawgClient().search_games(game.title, page_size=1)
+                    rawg_client = RawgClient()
+                    results = await rawg_client.search_games(game.title, page_size=1)
+                    if not results:
+                        # 标题搜索没找到时，用 steam_appid 反查
+                        steam_id = source_ids.get("steam") or game.steam_appid
+                        if steam_id:
+                            try:
+                                steam_rawg = await rawg_client.get_game_by_steam_appid(steam_id)
+                                if steam_rawg:
+                                    results = [steam_rawg]
+                                    logger.info("多来源刷新：game_id=%s, 通过 steam_appid=%s 反查到 rawg=%s", game.id, steam_id, steam_rawg["source_id"])
+                            except Exception as e:
+                                logger.warning("多来源刷新：game_id=%s, steam_appid 反查 rawg 失败: %s", game.id, e)
                     if results:
                         source_ids["rawg"] = results[0]["source_id"]
-                        source_data["rawg"] = await RawgClient().get_game_detail(results[0]["source_id"])
+                        source_data["rawg"] = await rawg_client.get_game_detail(results[0]["source_id"])
                 elif src == "vndb":
                     results = await search_vndb(game.title)
                     if results:
