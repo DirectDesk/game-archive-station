@@ -126,6 +126,8 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
     directory.mkdir(parents=True, exist_ok=True)
     if requested_source:
         priority = [requested_source]
+        # 指定来源时，无论是否找到截图，都记录用户选择的来源
+        game.screenshot_source = requested_source
     elif game.source_type == "steam" and "steam" in priority:
         priority = ["steam"] + [s for s in priority if s != "steam"]
     for source in priority:
