@@ -398,8 +398,8 @@ async def refresh_game_metadata(game_id: int) -> None:
                     logger.info("多来源刷新：game_id=%s, 补充新来源 %s=%s", game.id, src, source_ids[src])
             except Exception as e:
                 logger.warning("多来源刷新：game_id=%s, 补充来源 %s 失败: %s", game.id, src, e)
-        game.source_ids = json.dumps(source_ids, ensure_ascii=False)
-        game.source_data = json.dumps(source_data, ensure_ascii=False)
+        game.source_ids = json.dumps(source_ids, ensure_ascii=False, default=str)
+        game.source_data = json.dumps(source_data, ensure_ascii=False, default=str)
         await session.commit()
 
 
