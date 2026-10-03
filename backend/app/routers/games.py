@@ -57,7 +57,11 @@ async def all_tags(source: str = "all", original: bool = False, page: int = 1, s
                 else:
                     # 译文模式：用术语表翻译
                     from ..translation_service import translation_service as _ts
-                    translated = await _ts.translate(tag, "tag", db)
+                    # 英文标签术语表未命中时直接返回原文，不调谷歌翻译（提速）
+                    if all(ord(ch) < 128 for ch in tag) and tag not in _ts.glossary:
+                        translated = tag
+                    else:
+                        translated = await _ts.translate(tag, "tag", db)
                     counts[translated] = counts.get(translated, 0) + 1
     elif original:
         # source=all + 原文模式：从所有来源聚合原文标签
