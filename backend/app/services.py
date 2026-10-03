@@ -80,12 +80,20 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
             logger.warning("读取 RAWG Steam 商店信息失败：%s", game.source_id, exc_info=True)
     # Steam 截图：steam 来源游戏直接用已有 screenshots；其他来源有 steam_appid 时调 appdetails 补截图
     if game.source_type == "steam":
-        try:
-            existing_steam = json.loads(game.screenshots or "[]")
-        except json.JSONDecodeError:
-            existing_steam = []
-        if existing_steam:
-            candidates["steam"] = existing_steam
+        # 优先从 original_data.screenshots 读远程 URL，不依赖可能被清空的 game.screenshots
+        od_steam = metadata.get("screenshots", "")
+        if od_steam:
+            try:
+                candidates["steam"] = json.loads(od_steam)
+            except json.JSONDecodeError:
+                pass
+        if not candidates.get("steam"):
+            try:
+                existing_steam = json.loads(game.screenshots or "[]")
+            except json.JSONDecodeError:
+                existing_steam = []
+            if existing_steam:
+                candidates["steam"] = existing_steam
     elif steam_appid:
         try:
             steam_detail = await SteamClient().get_game_detail(steam_appid)
