@@ -143,6 +143,17 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
             for index, url in enumerate(urls):
                 if not url:
                     continue
+                # 本地路径候选：校验文件名来源前缀匹配，避免把其他来源的本地路径当作当前来源候选
+                if url.startswith("/data/screenshots/"):
+                    fname = url.split("/")[-1]
+                    expected_prefix = f"{game.id}_{source}_"
+                    if not fname.startswith(expected_prefix):
+                        continue  # 来源不匹配，跳过
+                    # 来源匹配且文件存在，直接复用
+                    if (directory / fname).exists():
+                        cached.append(url)
+                        continue
+                    continue  # 文件不存在，跳过（本地路径无法重新下载）
                 suffix = ".png" if ".png" in url.lower() else ".jpg"
                 filename = f"{game.id}_{source}_{index}{suffix}"
                 path = directory / filename
