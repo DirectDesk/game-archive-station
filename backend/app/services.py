@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 
-async def resolve_tags(game: Game, config: SystemConfig, requested_source: str = "") -> str:
+async def resolve_tags(game: Game, config: SystemConfig, requested_source: str = "", db: AsyncSession = None) -> str:
     """按配置优先级从 original_data 中选择标签；返回选中的标签字符串。"""
     try:
         priority = json.loads(config.tag_source_priority or "[]")
@@ -48,10 +48,31 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
         if not tags and game.source_type == source:
             tags = metadata.get("tags", "")
         if tags:
-            game.tags = tags
+            # 原文标签存 source_data
+            try:
+                sd = json.loads(game.source_data or "{}")
+            except json.JSONDecodeError:
+                sd = {}
+            if source not in sd:
+                sd[source] = {}
+            sd[source]["tags"] = tags
+            game.source_data = json.dumps(sd, ensure_ascii=False, default=str)
+            # 翻译标签
+            translated_tags = tags
+            if db and config and config.auto_translate and config.translator_type != "none":
+                try:
+                    from app.translation_service import TranslationService
+                    ts = TranslationService()
+                    await ts.load(db)
+                    parts = [p.strip() for p in tags.split(",") if p.strip()]
+                    translated_parts = [await ts.translate(p, "tag") for p in parts]
+                    translated_tags = ", ".join(translated_parts)
+                except Exception as e:
+                    logger.warning("标签翻译失败 game_id=%s: %s", game.id, e)
+            game.tags = translated_tags
             game.tag_source = source
-            logger.info("标签解析：game_id=%s, source=%s, tags=%.80s", game.id, source, tags)
-            return tags
+            logger.info("标签解析：game_id=%s, source=%s, tags=%.80s", game.id, source, translated_tags)
+            return translated_tags
     game.tags = ""
     game.tag_source = ""
     logger.warning("标签解析失败：game_id=%s，所有来源均无标签，已清空", game.id)

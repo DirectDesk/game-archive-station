@@ -293,7 +293,7 @@ class LibraryScanner:
             metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite", "file_size": _dir_size})
             game = Game(**metadata)
             try:
-                await resolve_tags(game, config)
+                await resolve_tags(game, config, "", db)
             except Exception:
                 logger.exception("标签解析失败：%s", folder_path)
             db.add(game)
