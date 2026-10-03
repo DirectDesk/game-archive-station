@@ -161,7 +161,16 @@ async def change_cover_source(
     else:
         metadata["cover_urls"] = urls
         game.original_data = json.dumps(metadata, ensure_ascii=False)
-        cover_url = urls.get(source, "")
+        # 优先从 source_data[source].cover_url 取
+        try:
+            _sd = json.loads(game.source_data or "{}")
+        except json.JSONDecodeError:
+            _sd = {}
+        cover_url = ""
+        if source in _sd and _sd[source].get("cover_url"):
+            cover_url = _sd[source]["cover_url"]
+        if not cover_url:
+            cover_url = urls.get(source, "")
         if source == "steam" and game.steam_appid:
             cover_url = RawgClient.steam_cover_url(game.steam_appid)
         elif source == existing_source and game.cover_url and not game.cover_url.startswith("/data/covers/"):

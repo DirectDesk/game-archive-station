@@ -311,6 +311,73 @@ async def refresh_game_metadata(game_id: int) -> None:
         except Exception:
             await session.rollback()
 
+        # 多来源刷新：遍历 source_ids 中其他来源，逐个更新 source_data
+        try:
+            source_ids = json.loads(game.source_ids or "{}")
+        except json.JSONDecodeError:
+            source_ids = {}
+        try:
+            source_data = json.loads(game.source_data or "{}")
+        except json.JSONDecodeError:
+            source_data = {}
+        # 主来源数据也存入 source_data
+        if game.source_type and game.source_type != "custom":
+            source_data[game.source_type] = {k: v for k, v in metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
+            source_ids[game.source_type] = game.source_id
+        # 刷新其他已有来源
+        for src, sid in list(source_ids.items()):
+            if src == game.source_type or not sid:
+                continue
+            try:
+                if src == "rawg":
+                    src_meta = await RawgClient().get_game_detail(sid)
+                elif src == "steam":
+                    src_meta = await get_steam_detail(sid)
+                elif src == "vndb":
+                    src_meta = await get_vndb_detail(sid)
+                elif src == "dlsite":
+                    src_meta = await get_dlsite_detail(sid)
+                else:
+                    continue
+                source_data[src] = src_meta
+                logger.info("多来源刷新：game_id=%s, source=%s 成功", game.id, src)
+            except Exception as e:
+                logger.warning("多来源刷新：game_id=%s, source=%s 失败: %s", game.id, src, e)
+        # 尝试补充新来源（搜索匹配）
+        for src in ["steam", "rawg", "vndb", "dlsite"]:
+            if src in source_ids and source_ids[src]:
+                continue
+            try:
+                if src == "steam":
+                    results = await search_steam(game.title)
+                    if results:
+                        source_ids["steam"] = results[0]["source_id"]
+                        source_data["steam"] = await get_steam_detail(results[0]["source_id"])
+                elif src == "rawg":
+                    results = await RawgClient().search_games(game.title, page_size=1)
+                    if results:
+                        source_ids["rawg"] = results[0]["source_id"]
+                        source_data["rawg"] = await RawgClient().get_game_detail(results[0]["source_id"])
+                elif src == "vndb":
+                    results = await search_vndb(game.title)
+                    if results:
+                        source_ids["vndb"] = results[0]["source_id"]
+                        source_data["vndb"] = await get_vndb_detail(results[0]["source_id"])
+                elif src == "dlsite":
+                    from .clients.dlsite_client import DlsiteClient
+                    dlsite = DlsiteClient()
+                    workno = dlsite.extract_workno(game.title) or dlsite.extract_workno(game.resource_url or "")
+                    if workno:
+                        source_ids["dlsite"] = workno
+                        source_data["dlsite"] = await get_dlsite_detail(workno)
+                if src in source_ids and source_ids[src]:
+                    logger.info("多来源刷新：game_id=%s, 补充新来源 %s=%s", game.id, src, source_ids[src])
+            except Exception as e:
+                logger.warning("多来源刷新：game_id=%s, 补充来源 %s 失败: %s", game.id, src, e)
+        game.source_ids = json.dumps(source_ids, ensure_ascii=False)
+        game.source_data = json.dumps(source_data, ensure_ascii=False)
+        await session.commit()
+
 
 async def refresh_vndb_game_metadata(game_id: int) -> None:
     """按当前标题重新搜索 VNDB，并用首个结果的详情刷新游戏元数据。"""
