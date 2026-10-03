@@ -13,7 +13,7 @@ from ..cover_service import cache_cover
 from ..database import get_db
 from ..models import Game, SystemConfig
 from ..schemas import GameCreate, GameOut, GameUpdate, RefreshMetadataTaskOut
-from ..services import fetch_game_screenshots, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata, search_steam, resolve_tags
+from ..services import fetch_game_screenshots, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata, search_steam, resolve_tags, get_steam_detail, get_vndb_detail, get_dlsite_detail
 from ..task_manager import task_manager
 
 router = APIRouter(prefix="/api/games", tags=["games"])
@@ -64,6 +64,103 @@ async def create_game(payload: GameCreate, db: AsyncSession = Depends(get_db)):
     db.add(game)
     await db.commit()
     await db.refresh(game)
+    return game
+
+
+@router.post("/from-source", response_model=GameOut)
+async def create_game_from_source(
+    source_type: str = Body(...),
+    source_id: str = Body(""),
+    title: str = Body(""),
+    resource_type: str = Body("none"),
+    resource_url: str = Body(""),
+    db: AsyncSession = Depends(get_db),
+):
+    """从数据源创建游戏：复用元数据获取流程，自动翻译并补充多来源数据。"""
+    from ..translation_service import TranslationService
+    import json as _json
+
+    # 1. 获取元数据详情
+    metadata = {}
+    if source_type == "rawg":
+        if not source_id:
+            raise HTTPException(400, "rawg 来源需要 source_id")
+        metadata = await RawgClient().get_game_detail(source_id)
+    elif source_type == "steam":
+        if not source_id:
+            raise HTTPException(400, "steam 来源需要 source_id")
+        metadata = await get_steam_detail(source_id)
+    elif source_type == "vndb":
+        if not source_id:
+            raise HTTPException(400, "vndb 来源需要 source_id")
+        metadata = await get_vndb_detail(source_id)
+    elif source_type == "dlsite":
+        if not source_id:
+            raise HTTPException(400, "dlsite 来源需要 source_id")
+        metadata = await get_dlsite_detail(source_id)
+    elif source_type == "custom":
+        metadata = {"title": title or "未命名游戏", "source_type": "custom", "source_id": ""}
+    else:
+        raise HTTPException(400, f"不支持的来源类型：{source_type}")
+
+    # 2. 自定义标题覆盖
+    if title:
+        metadata["title"] = title
+
+    # 3. 翻译元数据
+    config = await db.get(SystemConfig, 1)
+    if not config:
+        config = SystemConfig(id=1)
+    try:
+        ts = TranslationService()
+        metadata = await ts.translate_metadata(db, metadata)
+    except Exception as e:
+        logger.warning("新增游戏翻译失败：%s", e)
+
+    # 4. 存入 source_data/source_ids
+    source_data = {}
+    source_ids = {}
+    if source_type != "custom" and source_id:
+        source_data[source_type] = {k: v for k, v in metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
+        source_ids[source_type] = source_id
+
+    # 5. 创建游戏
+    game = Game(
+        title=metadata.get("title", ""),
+        alias=metadata.get("alias", ""),
+        cover_url=metadata.get("cover_url", ""),
+        cover_source=source_type,
+        steam_appid=metadata.get("steam_appid", ""),
+        screenshots=metadata.get("screenshots", "[]"),
+        description=metadata.get("description", ""),
+        developer=metadata.get("developer", ""),
+        publisher=metadata.get("publisher", ""),
+        release_date=metadata.get("release_date"),
+        rating=metadata.get("rating"),
+        tags=metadata.get("tags", ""),
+        tag_source=source_type,
+        series=metadata.get("series", ""),
+        version=metadata.get("version", ""),
+        source_type=source_type,
+        source_id=source_id,
+        source_ids=_json.dumps(source_ids, ensure_ascii=False),
+        source_data=_json.dumps(source_data, ensure_ascii=False, default=str),
+        original_data=metadata.get("original_data", "{}"),
+        resource_type=resource_type,
+        resource_url=resource_url,
+        play_status="favorite",
+    )
+    db.add(game)
+    await db.commit()
+    await db.refresh(game)
+
+    # 6. 自动补充多来源数据（后台执行，不阻塞响应）
+    try:
+        await refresh_game_metadata(game.id)
+        await db.refresh(game)
+    except Exception as e:
+        logger.warning("新增游戏多来源补充失败 game_id=%s: %s", game.id, e)
+
     return game
 
 
