@@ -32,6 +32,8 @@ class Game(Base):
     version: Mapped[str] = mapped_column(String(100), default="")
     source_type: Mapped[str] = mapped_column(String(20), default="custom")
     source_id: Mapped[str] = mapped_column(String(100), default="")
+    source_ids: Mapped[str] = mapped_column(Text, default="{}")
+    source_data: Mapped[str] = mapped_column(Text, default="{}")
     resource_type: Mapped[str] = mapped_column(String(20), default="none")
     resource_url: Mapped[str] = mapped_column(String(2000), default="")
     play_status: Mapped[str] = mapped_column(String(20), default="favorite")

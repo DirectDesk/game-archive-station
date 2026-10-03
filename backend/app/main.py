@@ -4,11 +4,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .models import SystemConfig
+from .models import Game, SystemConfig
 from .routers import downloads, games, glossary, metadata, scans, settings as settings_router
 from .scheduler import scan_scheduler
 from .translation_service import translation_service
@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
         await connection.run_sync(Base.metadata.create_all)
         columns = (await connection.execute(text("PRAGMA table_info(games)"))).mappings().all()
         existing_game_columns = {column["name"] for column in columns}
-        for name, definition in {"screenshots": "TEXT DEFAULT ''", "original_data": "TEXT DEFAULT ''", "version": "VARCHAR(100) DEFAULT ''", "cover_source": "VARCHAR(20) DEFAULT ''", "steam_appid": "VARCHAR(20) DEFAULT ''", "screenshot_source": "VARCHAR(20) DEFAULT ''"}.items():
+        for name, definition in {"screenshots": "TEXT DEFAULT ''", "original_data": "TEXT DEFAULT ''", "version": "VARCHAR(100) DEFAULT ''", "cover_source": "VARCHAR(20) DEFAULT ''", "steam_appid": "VARCHAR(20) DEFAULT ''", "screenshot_source": "VARCHAR(20) DEFAULT ''", "source_ids": "TEXT DEFAULT '{}'", "source_data": "TEXT DEFAULT '{}'"}.items():
             if name not in existing_game_columns:
                 await connection.execute(text(f"ALTER TABLE games ADD COLUMN {name} {definition}"))
         config_columns = (await connection.execute(text("PRAGMA table_info(system_config)"))).mappings().all()
@@ -42,6 +42,30 @@ async def lifespan(app: FastAPI):
         if not await db.get(SystemConfig, 1):
             db.add(SystemConfig(id=1))
             await db.commit()
+        # 迁移旧游戏 original_data → source_data/source_ids
+        import json as _json
+        all_games = (await db.execute(select(Game))).scalars().all()
+        migrated_count = 0
+        for _g in all_games:
+            if _g.source_data and _g.source_data != "{}":
+                continue
+            try:
+                _old = _json.loads(_g.original_data or "{}")
+            except _json.JSONDecodeError:
+                _old = {}
+            _sd = {}
+            _sids = {}
+            if _g.source_type and _g.source_type != "custom" and _g.source_id:
+                _sd[_g.source_type] = _old
+                _sids[_g.source_type] = _g.source_id
+            if _old.get("steam_appid") and "steam" not in _sids:
+                _sids["steam"] = _old["steam_appid"]
+            _g.source_data = _json.dumps(_sd, ensure_ascii=False)
+            _g.source_ids = _json.dumps(_sids, ensure_ascii=False)
+            migrated_count += 1
+        if migrated_count:
+            await db.commit()
+            print(f"[迁移] 已迁移 {migrated_count} 个游戏的 original_data → source_data/source_ids")
         await translation_service.load(db)
     # 只注册每日增量任务；不会在服务启动时扫描，更不会自动执行全量扫描。
     async with SessionLocal() as db:

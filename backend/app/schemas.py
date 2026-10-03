@@ -24,6 +24,8 @@ class GameBase(BaseModel):
     version: str = ""
     source_type: str = "custom"
     source_id: str = ""
+    source_ids: str = "{}"
+    source_data: str = "{}"
     resource_type: Literal["nas_cloud", "nas_local", "web_link", "none"] = "none"
     resource_url: str = ""
     play_status: Literal["favorite", "playing", "completed"] = "favorite"
