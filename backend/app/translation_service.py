@@ -14,10 +14,7 @@ logger = logging.getLogger(__name__)
 class TranslationService:
     def __init__(self):
         self.glossary: dict[tuple[str, str], str] = {}
-        self.tag_glossary: dict[str, str] = {}
         self.translator = get_translator("none")
-        from .config import settings
-        self.glossary_path = settings.data_dir / "tag_glossary.json"
 
     async def load(self, db: AsyncSession) -> None:
         config = await db.get(SystemConfig, 1)
@@ -31,57 +28,59 @@ class TranslationService:
             (row.source_text, row.category or ""): row.target_text
             for row in await db.scalars(select(TranslationGlossary))
         }
-        self._load_tag_glossary()
+        pass
 
-    def _load_tag_glossary(self) -> None:
-        try:
-            if self.glossary_path.exists():
-                import json as _json
-                with open(self.glossary_path, 'r', encoding='utf-8') as f:
-                    self.tag_glossary = _json.load(f)
-        except Exception as e:
-            logger.warning("加载标签术语表失败：%s", e)
-            self.tag_glossary = {}
-
-    def _save_tag_glossary(self) -> None:
-        try:
-            import json as _json
-            self.glossary_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.glossary_path, 'w', encoding='utf-8') as f:
-                _json.dump(self.tag_glossary, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.warning("保存标签术语表失败：%s", e)
-
-    async def _google_translate(self, text: str) -> str:
+    async def _google_translate(self, text: str, retries: int = 3) -> str:
+        """谷歌翻译（非官方免费接口，带重试退避）"""
         import os as _os
+        import asyncio as _asyncio
         proxy = _os.environ.get("HTTP_PROXY") or _os.environ.get("http_proxy") or _os.environ.get("HTTPS_PROXY") or _os.environ.get("https_proxy")
-        try:
-            async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
-                resp = await client.get(
-                    "https://translate.googleapis.com/translate_a/single",
-                    params={"client": "gtx", "sl": "ja", "tl": "zh-CN", "dt": "t", "q": text}
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                result = "".join(part[0] for part in data[0] if part[0])
-                return result.strip()
-        except Exception as e:
-            logger.warning("谷歌翻译失败：%s -> %s", text, e)
-            return text
+        for attempt in range(retries):
+            try:
+                async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
+                    resp = await client.get(
+                        "https://translate.googleapis.com/translate_a/single",
+                        params={"client": "gtx", "sl": "ja", "tl": "zh-CN", "dt": "t", "q": text}
+                    )
+                    if resp.status_code == 429:
+                        wait = 2 ** (attempt + 1)
+                        logger.info("谷歌翻译429限流，%.1f秒后重试(%d/%d)：%s", wait, attempt+1, retries, text)
+                        await _asyncio.sleep(wait)
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    result = "".join(part[0] for part in data[0] if part[0])
+                    return result.strip()
+            except Exception as e:
+                if attempt < retries - 1:
+                    await _asyncio.sleep(1)
+                    continue
+                logger.warning("谷歌翻译失败：%s -> %s", text, e)
+                return text
+        return text
 
-    async def translate(self, text: str, category: str | None = None) -> str:
+    async def translate(self, text: str, category: str | None = None, db=None) -> str:
         if not text:
             return text
         # 标签(category="tag")：优先用内置术语表，没有的保留原文（腾讯翻译君对galgame标签翻译质量差）
         if category == "tag":
-            if text in self.tag_glossary:
-                return self.tag_glossary[text]
+            # 先查数据库术语表（category=tag）
+            cached = self.glossary.get((text, "tag")) or self.glossary.get((text, ""))
+            if cached:
+                return cached
+            # 谷歌翻译兜底
             translated = await self._google_translate(text)
-            if translated and translated != text:
-                self.tag_glossary[text] = translated
-                self._save_tag_glossary()
-                return translated
-            return text
+            if translated and translated != text and db is not None:
+                # 自动写入数据库术语表
+                try:
+                    from .models import TranslationGlossary
+                    db.add(TranslationGlossary(source_text=text, target_text=translated, category="tag"))
+                    await db.commit()
+                    self.glossary[(text, "tag")] = translated
+                    logger.info("标签谷歌翻译并加入术语表：%s -> %s", text, translated)
+                except Exception as e:
+                    logger.warning("标签术语写入失败：%s -> %s", text, e)
+            return translated or text
         if category != "tag":
             # 中文字符占比超过 30% 且不含日文假名，才认为是中文文本，跳过翻译；
             # 日文也使用汉字，需检测假名（平假名/片假名）区分；英文简介混入少量中文专有名词仍需翻译。

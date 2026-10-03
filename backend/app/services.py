@@ -66,7 +66,7 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
                     ts = TranslationService()
                     await ts.load(db)
                     parts = [p.strip() for p in tags.split(",") if p.strip()]
-                    translated_parts = [await ts.translate(p, "tag") for p in parts]
+                    translated_parts = [await ts.translate(p, "tag", db) for p in parts]
                     translated_tags = ", ".join(translated_parts)
                 except Exception as e:
                     logger.warning("标签翻译失败 game_id=%s: %s", game.id, e)

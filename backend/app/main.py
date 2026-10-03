@@ -17,12 +17,29 @@ from .translation_service import translation_service
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    # 复制默认标签术语表到 data 目录（容器重建后自动恢复）
-    import shutil as _shutil
+    # 导入默认标签术语表到数据库（category=tag）
+    import json as _json
     _default_glossary = Path(__file__).parent / "data" / "tag_glossary.json"
-    _target_glossary = settings.data_dir / "tag_glossary.json"
-    if _default_glossary.exists() and not _target_glossary.exists():
-        _shutil.copy(_default_glossary, _target_glossary)
+    if _default_glossary.exists():
+        try:
+            with open(_default_glossary, 'r', encoding='utf-8') as f:
+                _tag_data = _json.load(f)
+            from .models import TranslationGlossary
+            from sqlalchemy import select as _select
+            _existing = set()
+            async with engine.connect() as _conn:
+                _rows = (await _conn.execute(_select(TranslationGlossary.source_text).where(TranslationGlossary.category == "tag"))).all()
+                _existing = {r[0] for r in _rows}
+            _added = 0
+            for _src, _tgt in _tag_data.items():
+                if _src not in _existing:
+                    async with engine.begin() as _conn:
+                        await _conn.execute(TranslationGlossary.__table__.insert().values(source_text=_src, target_text=_tgt, category="tag"))
+                    _added += 1
+            if _added > 0:
+                print(f"[startup] 导入 {_added} 条标签术语表到数据库")
+        except Exception as e:
+            print(f"[startup] 导入标签术语表失败：{e}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         columns = (await connection.execute(text("PRAGMA table_info(games)"))).mappings().all()
