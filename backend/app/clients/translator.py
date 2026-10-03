@@ -1,4 +1,5 @@
 from .tencent_translator import TencentTranslator
+from .google_translator import GoogleTranslator
 from .translator_base import TranslatorBase
 
 
@@ -10,10 +11,10 @@ class NullTranslator(TranslatorBase):
         return texts
 
 
-TRANSLATORS = {"tencent": TencentTranslator, "none": NullTranslator}
+TRANSLATORS = {"tencent": TencentTranslator, "google": GoogleTranslator, "none": NullTranslator}
 # 预留："openai": OpenAITranslator, "deepl": DeepLTranslator
 
 
 def get_translator(translator_type: str, **kwargs) -> TranslatorBase:
     translator = TRANSLATORS.get(translator_type, NullTranslator)
-    return translator(**kwargs) if translator is TencentTranslator else translator()
+    return translator(**kwargs) if translator in (TencentTranslator, GoogleTranslator) else translator()
