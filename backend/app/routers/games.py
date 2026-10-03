@@ -40,6 +40,12 @@ async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_typ
 async def all_tags(source: str = "all", original: bool = False, page: int = 1, size: int = 25, db: AsyncSession = Depends(get_db)):
     import json as _json
     counts: dict[str, int] = {}
+    # 一次性加载术语表到本地字典（避免全局单例状态不一致）
+    from ..models import TranslationGlossary as _TG
+    from sqlalchemy import select as _select
+    _local_glossary: dict[str, str] = {}
+    async for _item in await db.stream_scalars(_select(_TG).where(_TG.category == "tag")):
+        _local_glossary[_item.source_text] = _item.target_text
 
     # source != all 时，从 source_data 按来源筛选
     if source != "all":
@@ -57,14 +63,17 @@ async def all_tags(source: str = "all", original: bool = False, page: int = 1, s
                 else:
                     # 译文模式：用术语表翻译
                     from ..translation_service import translation_service as _ts
+                    # 确保 glossary 已加载到内存
+                    if not _ts.glossary:
+                        await _ts.load(db)
                     # 已是中文的标签先查术语表（可能有修正），没有才直接使用，跳过翻译提速
                     _chinese_count = sum(1 for _ch in tag if "\u4e00" <= _ch <= "\u9fff")
                     _has_kana = any("\u3040" <= _ch <= "\u309f" or "\u30a0" <= _ch <= "\u30ff" for _ch in tag)
                     if not _has_kana and _chinese_count / len(tag) > 0.3:
                         # 中文标签：先查术语表（可能有修正），没有才直接用原文
-                        _cached = _ts.glossary.get((tag, "tag")) or _ts.glossary.get((tag, ""))
-                        translated = _cached if _cached else tag
+                        translated = _local_glossary.get(tag, tag)
                     else:
+                        # 非中文标签：用翻译服务（术语表优先+谷歌兜底）
                         translated = await _ts.translate(tag, "tag", db)
                     counts[translated] = counts.get(translated, 0) + 1
     elif original:

@@ -61,6 +61,12 @@ async def lifespan(app: FastAPI):
                 SELECT MIN(id) FROM games WHERE resource_url != '' GROUP BY resource_url
             ) AND resource_url != ''
         """))
+    # 预加载翻译术语表到内存
+    from .translation_service import translation_service as _ts
+    async with SessionLocal() as _db:
+        await _ts.load(_db)
+    print(f"[startup] 翻译术语表已加载: {len(_ts.glossary)} 条")
+
     async with SessionLocal() as db:
         if not await db.get(SystemConfig, 1):
             db.add(SystemConfig(id=1))
