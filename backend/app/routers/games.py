@@ -40,8 +40,28 @@ async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_typ
 async def all_tags(source: str = "all", original: bool = False, db: AsyncSession = Depends(get_db)):
     import json as _json
     counts: dict[str, int] = {}
-    if original:
-        sources = [source] if source != "all" else ["rawg", "steam", "vndb", "dlsite"]
+
+    # source != all 时，从 source_data 按来源筛选
+    if source != "all":
+        for sd in await db.scalars(select(Game.source_data).where(Game.source_data != "{}")):
+            try:
+                data = _json.loads(sd)
+            except Exception:
+                continue
+            src_data = data.get(source, {}) if isinstance(data.get(source), dict) else {}
+            tags_str = src_data.get("tags", "")
+            for tag in {item.strip() for item in tags_str.split(",") if item.strip()}:
+                if original:
+                    # 原文模式：直接返回原文标签
+                    counts[tag] = counts.get(tag, 0) + 1
+                else:
+                    # 译文模式：用术语表翻译
+                    from ..translation_service import translation_service as _ts
+                    translated = await _ts.translate(tag, "tag", db)
+                    counts[translated] = counts.get(translated, 0) + 1
+    elif original:
+        # source=all + 原文模式：从所有来源聚合原文标签
+        sources = ["rawg", "steam", "vndb", "dlsite"]
         for sd in await db.scalars(select(Game.source_data).where(Game.source_data != "{}")):
             try:
                 data = _json.loads(sd)
@@ -52,9 +72,11 @@ async def all_tags(source: str = "all", original: bool = False, db: AsyncSession
                 for tag in {item.strip() for item in tags_str.split(",") if item.strip()}:
                     counts[tag] = counts.get(tag, 0) + 1
     else:
+        # source=all + 译文模式：从 Game.tags 聚合（当前逻辑）
         for value in await db.scalars(select(Game.tags).where(Game.tags != "")):
             for tag in {item.strip() for item in value.split(",") if item.strip()}:
                 counts[tag] = counts.get(tag, 0) + 1
+
     return [{"tag": tag, "count": count} for tag, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
 
 
