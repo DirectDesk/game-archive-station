@@ -72,7 +72,7 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
                     logger.warning("标签翻译失败 game_id=%s: %s", game.id, e)
             game.tags = translated_tags
             game.tag_source = source
-            logger.info("标签解析：game_id=%s, source=%s, tags=%.80s", game.id, source, translated_tags)
+            logger.info("标签解析：game_id=%s, source=%s, 原文=%.60s, 译文=%.60s", game.id, source, tags[:60], translated_tags[:60])
             return translated_tags
     game.tags = ""
     game.tag_source = ""

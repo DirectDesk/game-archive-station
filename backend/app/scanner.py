@@ -111,8 +111,21 @@ class LibraryScanner:
         async with SessionLocal() as db:
             # 仅按标准化后的 resource_url 去重；title 会被元数据覆盖，不能用于去重。
             folder_path = str(folder.resolve()).rstrip("/").replace("//", "/")
-            exists = await db.scalar(select(Game.id).where(Game.resource_url == folder_path))
-            if exists:
+            exists_id = await db.scalar(select(Game.id).where(Game.resource_url == folder_path))
+            if exists_id:
+                exists = await db.get(Game, exists_id)
+                if exists and (not exists.file_size or exists.file_size == 0):
+                    try:
+                        _sz = 0
+                        for _root, _dirs, _files in os.walk(folder_path):
+                            for _f in _files:
+                                try: _sz += os.path.getsize(os.path.join(_root, _f))
+                                except OSError: pass
+                        exists.file_size = _sz
+                        await db.commit()
+                        logger.info("更新游戏容量：game_id=%s, size=%d", exists.id, _sz)
+                    except Exception:
+                        pass
                 return False
 
             # 文件夹名是唯一可用的低 IO 发现信息；不进入文件夹读取文件。
