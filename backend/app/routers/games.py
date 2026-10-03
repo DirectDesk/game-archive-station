@@ -37,7 +37,7 @@ async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_typ
 
 
 @router.get("/all-tags")
-async def all_tags(source: str = "all", original: bool = False, db: AsyncSession = Depends(get_db)):
+async def all_tags(source: str = "all", original: bool = False, page: int = 1, size: int = 25, db: AsyncSession = Depends(get_db)):
     import json as _json
     counts: dict[str, int] = {}
 
@@ -77,7 +77,11 @@ async def all_tags(source: str = "all", original: bool = False, db: AsyncSession
             for tag in {item.strip() for item in value.split(",") if item.strip()}:
                 counts[tag] = counts.get(tag, 0) + 1
 
-    return [{"tag": tag, "count": count} for tag, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
+    all_items = [{"tag": tag, "count": count} for tag, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
+    total = len(all_items)
+    start = (page - 1) * size
+    end = start + size
+    return {"items": all_items[start:end], "total": total, "page": page, "size": size}
 
 
 @router.post("", response_model=GameOut)

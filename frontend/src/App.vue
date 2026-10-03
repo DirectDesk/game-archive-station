@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
-const games = ref([]), error = ref(''), active = ref(null), showForm = ref(false), showSettings = ref(false), searchResults = ref([]), searching = ref(false), now = ref(Date.now()), scanStatus = ref({ status:'idle', next_run_at:null }), previewScreenshot = ref(-1), settingsTab = ref('scan'), glossary = ref([]), glossaryQ = ref(''), glossaryCategory = ref(''), glossaryDraft = reactive({source_text:'',target_text:'',category:'tag'}), glossaryEditing = ref(null), glossaryBatch = ref(''), glossaryPage = ref(1), glossarySize = ref(50), glossaryTotal = ref(0), allTags = ref([]), selectedTags = ref([]), showMoreTags = ref(false), showTransfer = ref(false), transferSubdir = ref(''), transferTask = ref(null), showOriginal = ref(false), sourcePriority = ref(['rawg','steam','vndb','dlsite']), sourceEnabled = reactive({rawg:true,steam:true,vndb:true,dlsite:true}), draggedSource = ref(null),coverPriority = ref(['steam','vndb','dlsite','rawg']), coverEnabled = reactive({rawg:true,steam:true,vndb:true,dlsite:true}), draggedCover = ref(null),screenshotPriority = ref(['rawg','steam','vndb','dlsite']), screenshotEnabled = reactive({rawg:true,steam:true,vndb:true,dlsite:true}), draggedScreenshot = ref(null), tagPriority = ref(['steam','rawg','vndb','dlsite']), tagEnabled = reactive({rawg:true,steam:true,vndb:true,dlsite:true}), draggedTag = ref(null), showTagPanel = ref(false), tagSearch = ref(''), tagFilterSource = ref('all')
+const games = ref([]), error = ref(''), active = ref(null), showForm = ref(false), showSettings = ref(false), searchResults = ref([]), searching = ref(false), now = ref(Date.now()), scanStatus = ref({ status:'idle', next_run_at:null }), previewScreenshot = ref(-1), settingsTab = ref('scan'), glossary = ref([]), glossaryQ = ref(''), glossaryCategory = ref(''), glossaryDraft = reactive({source_text:'',target_text:'',category:'tag'}), glossaryEditing = ref(null), glossaryBatch = ref(''), glossaryPage = ref(1), glossarySize = ref(50), glossaryTotal = ref(0), allTags = ref([]), selectedTags = ref([]), showMoreTags = ref(false), showTransfer = ref(false), transferSubdir = ref(''), transferTask = ref(null), showOriginal = ref(false), sourcePriority = ref(['rawg','steam','vndb','dlsite']), sourceEnabled = reactive({rawg:true,steam:true,vndb:true,dlsite:true}), draggedSource = ref(null),coverPriority = ref(['steam','vndb','dlsite','rawg']), coverEnabled = reactive({rawg:true,steam:true,vndb:true,dlsite:true}), draggedCover = ref(null),screenshotPriority = ref(['rawg','steam','vndb','dlsite']), screenshotEnabled = reactive({rawg:true,steam:true,vndb:true,dlsite:true}), draggedScreenshot = ref(null), tagPriority = ref(['steam','rawg','vndb','dlsite']), tagEnabled = reactive({rawg:true,steam:true,vndb:true,dlsite:true}), draggedTag = ref(null), showTagPanel = ref(false), tagSearch = ref(''), tagFilterSource = ref('all'), tagPage = ref(1), tagSize = ref(25), tagTotal = ref(0), tagLoading = ref(false), tagHasMore = ref(true)
 const refreshing = reactive({}), refreshCooldowns = reactive({})
 const filters = reactive({ q: '', source_type: '', play_status: '', sort: 'updated' })
 const blank = () => ({ title:'', alias:'', cover_url:'', screenshots:'', description:'', developer:'', publisher:'', release_date:null, rating:null, tags:'', series:'', source_type:'custom', source_id:'', resource_type:'none', resource_url:'', play_status:'favorite' })
@@ -42,7 +42,29 @@ const filteredTags = computed(() => { const query=tagSearch.value.trim().toLower
 const gameTags = game => { const metadata=originalMetadataFor(game); const tags=showOriginal.value ? (metadata.tags || game.tags) : game.tags; return String(tags || '').split(',').map(tag => tag.trim()).filter(Boolean) }
 async function load() { try { [games.value, scanStatus.value] = await Promise.all([api('/api/games?'+new URLSearchParams({...filters,tag:selectedTags.value.join(',')})), api('/api/scans/status')]); error.value='' } catch(e) { error.value=e.message } }
 function formatSize(bytes) { if (!bytes || bytes<=0) return ''; const units=['B','KB','MB','GB','TB']; let i=0; let size=bytes; while(size>=1024 && i<units.length-1){size/=1024;i++} return size.toFixed(size>=10||i===0?0:1)+units[i] }
-async function loadTags() { const src=tagFilterSource.value; const orig=showOriginal.value?'&original=true':''; allTags.value=(await api('/api/games/all-tags?source='+encodeURIComponent(src)+orig)).filter(item=>item.count>0) }
+async function loadTags(reset=true) {
+  if (reset) { tagPage.value=1; tagHasMore.value=true; allTags.value=[] }
+  if (!tagHasMore.value || tagLoading.value) return
+  tagLoading.value=true
+  try {
+    const src=tagFilterSource.value
+    const orig=showOriginal.value?'&original=true':''
+    const r=await api(`/api/games/all-tags?source=${encodeURIComponent(src)}${orig}&page=${tagPage.value}&size=${tagSize.value}`)
+    const items=(r.items||r).filter(item=>item.count>0)
+    if (reset) allTags.value=items
+    else allTags.value=[...allTags.value, ...items]
+    tagTotal.value=r.total||allTags.value.length
+    tagHasMore.value=allTags.value.length<tagTotal.value && items.length>0
+    tagPage.value++
+  } catch(e) { console.error('loadTags error', e) }
+  finally { tagLoading.value=false }
+}
+function onTagScroll(e) {
+  const el=e.target
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 50) {
+    loadTags(false)
+  }
+}
 function toggleTag(tag) { selectedTags.value=selectedTags.value.includes(tag) ? selectedTags.value.filter(item=>item!==tag) : [...selectedTags.value,tag]; load() }
 function openNew() { Object.assign(form, blank()); coverSource.value='auto'; active.value=null; searchResults.value=[]; showForm.value=true }
 async function openGame(game) { active.value=game; coverSource.value=game.cover_source || 'auto'; Object.assign(form, {...game, resource_url:directoryPath(game.resource_url)}); transferTask.value=null; showForm.value=true; const saved=JSON.parse(localStorage.getItem('game-archive-transfer-task') || 'null'); if (saved && saved.game_id === game.id) { transferTask.value=saved; await pollTransfer() } try { const hasLocal = screenshots.value.some(u => u.startsWith('/data/')); if (!hasLocal) { Object.assign(form,await api(`/api/games/${game.id}/screenshots/fetch`)); await load() } } catch(e) { error.value=e.message } }
@@ -127,7 +149,10 @@ let timer; onMounted(()=>{showTagPanel.value=localStorage.getItem('tag_panel_ope
 </script>
 
   <template>
-  <aside class="fixed left-0 top-0 z-30 flex h-screen w-[240px] flex-col border-r border-slate-700 bg-panel p-3 shadow-xl transition-transform duration-200 ease-out" :style="{ transform: showTagPanel ? 'translateX(0)' : 'translateX(-100%)' }"><h2 class="mb-3 font-semibold">标签筛选</h2><input v-model="tagSearch" class="mb-2" placeholder="搜索标签"><select v-model="tagFilterSource" class="mb-3" @change="loadTags"><option value="all">所有来源</option><option value="rawg">RAWG</option><option value="steam">Steam</option><option value="vndb">VNDB</option><option value="dlsite">DLsite</option></select><div class="flex-1 space-y-1 overflow-y-auto pr-1"><button v-for="item in filteredTags" :key="item.tag" class="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-sm" :class="selectedTags.includes(item.tag)?'bg-accent text-slate-950':'text-slate-200 hover:bg-slate-700'" :title="item.tag" @click="toggleTag(item.tag)"><span class="truncate">{{item.tag}}</span><span class="ml-2 shrink-0 text-xs opacity-70">{{item.count}}</span></button><p v-if="!filteredTags.length" class="p-2 text-sm text-slate-500">没有匹配标签</p></div><button v-if="selectedTags.length" class="btn-muted mt-3 w-full" @click="selectedTags=[];load()">清除筛选</button></aside>
+  <aside class="fixed left-0 top-0 z-30 flex h-screen w-[240px] flex-col border-r border-slate-700 bg-panel p-3 shadow-xl transition-transform duration-200 ease-out" :style="{ transform: showTagPanel ? 'translateX(0)' : 'translateX(-100%)' }"><h2 class="mb-3 font-semibold">标签筛选</h2><input v-model="tagSearch" class="mb-2" placeholder="搜索标签"><select v-model="tagFilterSource" class="mb-3" @change="loadTags"><option value="all">所有来源</option><option value="rawg">RAWG</option><option value="steam">Steam</option><option value="vndb">VNDB</option><option value="dlsite">DLsite</option></select><div class="flex-1 space-y-1 overflow-y-auto pr-1" @scroll="onTagScroll"><button v-for="item in filteredTags" :key="item.tag" class="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-sm" :class="selectedTags.includes(item.tag)?'bg-accent text-slate-950':'text-slate-200 hover:bg-slate-700'" :title="item.tag" @click="toggleTag(item.tag)"><span class="truncate">{{item.tag}}</span><span class="ml-2 shrink-0 text-xs opacity-70">{{item.count}}</span></button><p v-if="!filteredTags.length" class="p-2 text-sm text-slate-500">没有匹配标签</p>
+<p v-if="tagLoading" class="p-2 text-center text-sm text-slate-400">加载中...</p>
+<p v-else-if="!tagHasMore && allTags.length" class="p-2 text-center text-xs text-slate-500">已加载全部 {{allTags.length}} 条</p>
+</div><button v-if="selectedTags.length" class="btn-muted mt-3 w-full" @click="selectedTags=[];load()">清除筛选</button></aside>
   <main class="mx-auto max-w-7xl p-4 md:p-8">
     <section class="mb-6 flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-3xl font-bold">游戏档案</h1><p class="mt-1 text-sm text-slate-400">扫描状态：{{scanStatus.message}} · 下次：{{nextScanAt}}</p></div><div class="flex flex-wrap gap-2"><button class="btn-muted" @click="showOriginal=!showOriginal;loadTags()">{{showOriginal?'显示译文':'显示原文'}}</button><button class="btn-muted" @click="openSettings">设置</button><button class="btn" @click="openNew">新增游戏</button></div></section>
     <p v-if="error" class="mb-4 rounded bg-red-950 p-3 text-red-200">{{ error }}</p>
