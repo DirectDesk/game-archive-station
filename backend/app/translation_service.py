@@ -180,6 +180,24 @@ class TranslationService:
             query = query.where(TranslationGlossary.source_text.ilike(f"%{q}%"))
         return list((await db.scalars(query.order_by(TranslationGlossary.id).offset((page - 1) * size).limit(size))).all())
 
+    async def count_items(self, db: AsyncSession, category: str = "", q: str = "") -> int:
+        from sqlalchemy import func as _func
+        query = select(_func.count(TranslationGlossary.id))
+        if category:
+            query = query.where(TranslationGlossary.category == category)
+        if q:
+            query = query.where(TranslationGlossary.source_text.ilike(f"%{q}%"))
+        return (await db.scalar(query)) or 0
+
+    async def count_items(self, db: AsyncSession, category: str = "", q: str = "") -> int:
+        from sqlalchemy import func as _func
+        query = select(_func.count(TranslationGlossary.id))
+        if category:
+            query = query.where(TranslationGlossary.category == category)
+        if q:
+            query = query.where(TranslationGlossary.source_text.ilike(f"%{q}%"))
+        return (await db.scalar(query)) or 0
+
     async def add(self, db: AsyncSession, data: dict) -> TranslationGlossary:
         item = TranslationGlossary(**data)
         db.add(item)

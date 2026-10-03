@@ -12,9 +12,11 @@ from pathlib import Path
 router = APIRouter(prefix="/api/glossary", tags=["glossary"])
 
 
-@router.get("", response_model=list[GlossaryOut])
-async def list_glossary(category: str = "", q: str = "", page: int = Query(1, ge=1), db: AsyncSession = Depends(get_db)):
-    return await translation_service.list_items(db, category, q, page)
+@router.get("")
+async def list_glossary(category: str = "", q: str = "", page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=200), db: AsyncSession = Depends(get_db)):
+    items = await translation_service.list_items(db, category, q, page, size)
+    total = await translation_service.count_items(db, category, q)
+    return {"items": [GlossaryOut.model_validate(item) for item in items], "total": total, "page": page, "size": size}
 
 
 @router.post("", response_model=GlossaryOut)
