@@ -31,19 +31,27 @@ class TranslationService:
     async def translate(self, text: str, category: str | None = None) -> str:
         if not text:
             return text
-        # 中文字符占比超过 30% 且不含日文假名，才认为是中文文本，跳过翻译；
-        # 日文也使用汉字，需检测假名（平假名/片假名）区分；英文简介混入少量中文专有名词仍需翻译。
-        chinese_count = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
-        has_japanese_kana = any("\u3040" <= char <= "\u309f" or "\u30a0" <= char <= "\u30ff" for char in text)
-        if not has_japanese_kana and chinese_count / len(text) > 0.3:
-            return text
+        # 标签(category="tag")禁用中文检测跳过：日文标签常含汉字（如"3D作品"），需强制翻译
+        if category != "tag":
+            # 中文字符占比超过 30% 且不含日文假名，才认为是中文文本，跳过翻译；
+            # 日文也使用汉字，需检测假名（平假名/片假名）区分；英文简介混入少量中文专有名词仍需翻译。
+            chinese_count = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+            has_japanese_kana = any("\u3040" <= char <= "\u309f" or "\u30a0" <= char <= "\u30ff" for char in text)
+            if not has_japanese_kana and chinese_count / len(text) > 0.3:
+                return text
         translated = self.glossary.get((text, category or "")) or self.glossary.get((text, ""))
         if translated:
+            logger.info("术语表命中：%s -> %s", text, translated)
             return translated
         try:
-            return await self.translator.translate(text)
+            result = await self.translator.translate(text)
+            if result != text:
+                logger.info("翻译成功（%s）：%s -> %s", category or "default", text, result)
+            else:
+                logger.info("翻译返回原文（%s）：%s", category or "default", text)
+            return result
         except Exception as exc:
-            logger.warning("翻译失败（%s）：%s", category or "default", exc, exc_info=True)
+            logger.warning("翻译失败（%s）：%s -> %s", category or "default", text, exc, exc_info=True)
             return text
 
     async def translate_fields(self, data: dict, field_map: dict) -> dict:
