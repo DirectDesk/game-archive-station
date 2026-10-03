@@ -107,6 +107,17 @@ class TranslationService:
                     return text
             if result != text:
                 logger.info("翻译成功（%s）：%s -> %s", category or "default", text, result)
+                # title 分类自动写入术语表（游戏名可能重复，缓存有意义）
+                # description 不缓存：太长且通常唯一，占用空间大
+                if category == "title" and db is not None and len(text) < 200:
+                    try:
+                        from .models import TranslationGlossary
+                        db.add(TranslationGlossary(source_text=text, target_text=result, category="title"))
+                        await db.commit()
+                        self.glossary[(text, "title")] = result
+                        logger.info("游戏名翻译并加入术语表：%s -> %s", text, result)
+                    except Exception as e:
+                        logger.warning("游戏名术语写入失败：%s -> %s", text, e)
             else:
                 logger.info("翻译返回原文（%s）：%s", category or "default", text)
             return result
