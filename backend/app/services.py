@@ -172,7 +172,10 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
         if existing_shots:
             candidates["dlsite"] = existing_shots
         elif game.source_id:
-            candidates["dlsite"] = await _dlsite_screenshots(game.source_id)
+            try:
+                candidates["dlsite"] = await _dlsite_screenshots(game.source_id)
+            except Exception:
+                pass
 
     logger.info("截图候选：rawg=%d, steam=%d, vndb=%d, dlsite=%d",
                 len(candidates.get("rawg", [])), len(candidates.get("steam", [])),
@@ -237,11 +240,15 @@ async def _vndb_screenshots(source_id: str) -> list[str]:
 
 
 async def _dlsite_screenshots(source_id: str) -> list[str]:
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
-        response = await client.get(f"https://www.dlsite.com/maniax/work/=/product_id/{source_id}.html")
-        response.raise_for_status()
-    urls = re.findall(r'https?://[^"\']+\.(?:jpg|jpeg|png)', response.text, re.I)
-    return list(dict.fromkeys(urls))
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            response = await client.get(f"https://www.dlsite.com/maniax/work/=/product_id/{source_id}.html")
+            response.raise_for_status()
+        urls = re.findall(r'https?://[^"\']+\.(?:jpg|jpeg|png)', response.text, re.I)
+        return list(dict.fromkeys(urls))
+    except Exception as e:
+        logger.warning("DLsite 截图获取失败 %s: %s", source_id, e)
+        return []
 
 
 async def search_vndb(query: str) -> list[dict]:
