@@ -17,6 +17,12 @@ from .translation_service import translation_service
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    # 复制默认标签术语表到 data 目录（容器重建后自动恢复）
+    import shutil as _shutil
+    _default_glossary = Path(__file__).parent / "data" / "tag_glossary.json"
+    _target_glossary = settings.data_dir / "tag_glossary.json"
+    if _default_glossary.exists() and not _target_glossary.exists():
+        _shutil.copy(_default_glossary, _target_glossary)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         columns = (await connection.execute(text("PRAGMA table_info(games)"))).mappings().all()
