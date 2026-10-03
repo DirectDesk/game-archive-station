@@ -1,6 +1,6 @@
 import asyncio
+import json
 import logging
-import os as _os
 import os
 import re
 from datetime import datetime
@@ -284,9 +284,9 @@ class LibraryScanner:
             # 计算文件夹大小
             _dir_size = 0
             try:
-                for _root, _dirs, _files in _os.walk(folder_path):
+                for _root, _dirs, _files in os.walk(folder_path):
                     for _f in _files:
-                        try: _dir_size += _os.path.getsize(_os.path.join(_root, _f))
+                        try: _dir_size += os.path.getsize(os.path.join(_root, _f))
                         except OSError: pass
             except Exception:
                 pass
