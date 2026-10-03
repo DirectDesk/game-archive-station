@@ -298,7 +298,11 @@ async def refresh_game_metadata(game_id: int) -> None:
             metadata = await get_dlsite_detail(game.source_id)
         else:
             raise RuntimeError("当前数据源不支持刷新元数据")
+        # 翻译前保存不参与翻译但需要保留的字段
+        _preserved = {k: metadata.get(k) for k in ("english_name", "cover_url", "release_date", "rating", "version") if metadata.get(k) is not None}
         metadata = await translation_service.translate_metadata(session, metadata)
+        # 翻译后合并回保留字段（翻译服务可能丢失这些字段）
+        metadata.update(_preserved)
         for field in ("title", "alias", "description", "developer", "publisher", "release_date", "rating", "tags", "series", "source_type", "source_id", "screenshots", "version", "original_data", "steam_appid"):
             if field in metadata:
                 setattr(game, field, metadata[field])
