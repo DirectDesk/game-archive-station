@@ -885,7 +885,21 @@ def normalize_release_date(value):
             return None
     return None
 
-async def retag_games_from_glossary(db: AsyncSession) -> int:
+async def _keep_user_title_default(db: AsyncSession) -> bool:
+    """返回是否启用「保留用户译名」。读 SystemConfig.keep_user_title，
+    字段不存在或无配置时默认 True（保护优先）。"""
+    try:
+        from .models import SystemConfig
+        cfg = await db.get(SystemConfig, 1)
+        if cfg is None:
+            return True
+        val = getattr(cfg, "keep_user_title", True)
+        return True if val is None else bool(val)
+    except Exception:
+        return True
+
+
+async def retag_games_from_glossary(db: AsyncSession, apply_title: bool | None = None) -> int:
     """术语表变更后，把最新的 tag 映射重新应用到所有游戏已持久化的标签上。
 
     策略：
@@ -968,10 +982,16 @@ async def retag_games_from_glossary(db: AsyncSession) -> int:
         if changed:
             game.tags = new_tags
         # title 类 + general 通用术语同步到标题
-        new_title = _apply_general(_apply_title(game.title or ""))
-        if new_title != (game.title or ""):
-            game.title = new_title
-            changed = True
+        # 保护：默认不覆盖 game.title，避免回归/术语表变更时冲掉用户手工改好的译名。
+        # 如需强制同步，显式传 apply_title=True（或在系统配置里关闭 keep_user_title）。
+        _apply_title_enabled = apply_title
+        if _apply_title_enabled is None:
+            _apply_title_enabled = not await _keep_user_title_default(db)
+        if _apply_title_enabled:
+            new_title = _apply_general(_apply_title(game.title or ""))
+            if new_title != (game.title or ""):
+                game.title = new_title
+                changed = True
         new_desc = _apply_general(game.description or "")
         if new_desc != (game.description or ""):
             game.description = new_desc
@@ -1944,7 +1964,7 @@ async def apply_match(game_id: int, source_type: str, source_id: str, set_primar
         return {"id": game.id, "game_type": game.game_type, "title": game.title}
 
 
-async def retranslate_game(game_id: int, force: bool = False) -> dict:
+async def retranslate_game(game_id: int, force: bool = False, keep_title: bool | None = None) -> dict:
     """用库内 original_data（翻译前原文）重新走一遍翻译，不联网刮削，用于改术语表后快速生效。
 
     force=True 时即使 auto_translate 关闭也强制翻译。
@@ -1981,10 +2001,15 @@ async def retranslate_game(game_id: int, force: bool = False) -> dict:
 
         changed = False
         # 重新翻译标题
+        # 保护：keep_title（默认读 keep_user_title 配置）为 True 时只翻译不覆盖 game.title，
+        # 避免用户手工改好的译名被冲掉。
+        _keep = keep_title
+        if _keep is None:
+            _keep = await _keep_user_title_default(session)
         src_title = original.get("title") or ""
         if src_title:
             new_title = await translation_service.translate(src_title, "title", session)
-            if new_title and new_title != game.title:
+            if new_title and new_title != game.title and not _keep:
                 game.title = new_title
                 changed = True
         # 重新翻译简介

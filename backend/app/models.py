@@ -67,6 +67,8 @@ class SystemConfig(Base):
     tag_source_priority: Mapped[str] = mapped_column(String(200), default='["steam","rawg","vndb","dlsite"]')
     scan_fetch_screenshots: Mapped[bool] = mapped_column(Boolean, default=False)
     max_screenshots: Mapped[int] = mapped_column(Integer, default=5)
+    # 保护用户手工译名：术语表变更/重翻译时默认不覆盖 game.title
+    keep_user_title: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class TranslationGlossary(Base):

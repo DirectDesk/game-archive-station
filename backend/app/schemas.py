@@ -123,6 +123,8 @@ class SettingsUpdate(BaseModel):
     download_dir: str | None = Field(default=None, max_length=500)
     rawg_api_key: str | None = Field(default=None, max_length=200)
     auto_translate: bool | None = None
+    # 保护用户手工译名：术语表变更/重翻译时不覆盖 game.title
+    keep_user_title: bool | None = None
     translator_type: Literal["none", "tencent", "google"] | None = None
     tencent_secret_id: str | None = Field(default=None, max_length=200)
     tencent_secret_key: str | None = Field(default=None, max_length=200)
