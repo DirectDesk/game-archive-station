@@ -69,7 +69,27 @@ function toggleTag(tag) { selectedTags.value=selectedTags.value.includes(tag) ? 
 function openNew() { Object.assign(form, blank()); coverSource.value='auto'; active.value=null; searchResults.value=[]; showForm.value=true }
 async function openGame(game) { active.value=game; coverSource.value=game.cover_source || 'auto'; Object.assign(form, {...game, resource_url:directoryPath(game.resource_url)}); transferTask.value=null; showForm.value=true; const saved=JSON.parse(localStorage.getItem('game-archive-transfer-task') || 'null'); if (saved && saved.game_id === game.id) { transferTask.value=saved; await pollTransfer() } try { const hasLocal = screenshots.value.some(u => u.startsWith('/data/')); if (!hasLocal) { Object.assign(form,await api(`/api/games/${game.id}/screenshots/fetch`)); await load() } } catch(e) { error.value=e.message } }
 async function save() { try { const url=active.value?`/api/games/${active.value.id}`:'/api/games'; form.resource_url=directoryPath(form.resource_url); await api(url,{method:active.value?'PUT':'POST',body:JSON.stringify(form)}); showForm.value=false; await load() } catch(e) { error.value=e.message } }
-async function removeGame() { if (active.value && confirm('确认删除此游戏？')) { await api(`/api/games/${active.value.id}`,{method:'DELETE'}); showForm.value=false; await load() } }
+async function removeGame() {
+  if (!active.value) return
+  const hasFiles = ['nas_cloud','nas_local'].includes(form.resource_type) && form.resource_url
+  let deleteFiles = false
+  if (hasFiles) {
+    if (confirm('仅删除游戏记录（保留 NAS 源文件）？\n\n点「确定」仅删记录；点「取消」可选择同时删除源文件。')) {
+      deleteFiles = false
+    } else if (confirm('⚠️ 确认同时删除 NAS 源文件？此操作不可恢复！\n\n' + form.resource_url)) {
+      deleteFiles = true
+    } else {
+      return
+    }
+  } else if (!confirm('确认删除此游戏记录？')) {
+    return
+  }
+  try {
+    await api(`/api/games/${active.value.id}${deleteFiles ? '?delete_files=true' : ''}`, {method:'DELETE'})
+    showForm.value = false
+    await load()
+  } catch(e) { error.value = e.message }
+}
 async function scrapeSearch() { searching.value=true; try { searchResults.value=await api(`/api/metadata/search?${new URLSearchParams(scrape)}`) } catch(e) { error.value=e.message } finally { searching.value=false } }
 async function choose(item) {
   try {
@@ -140,9 +160,9 @@ async function openSettings() { try { Object.assign(systemSettings,await api('/a
 async function saveSettings() { try { if (Object.values(sourceEnabled).filter(Boolean).length===0) { error.value='至少保留一个启用的数据源'; return } if (Object.values(coverEnabled).filter(Boolean).length===0) { error.value='至少保留一个启用的封面数据源'; return } if (Object.values(screenshotEnabled).filter(Boolean).length===0) { error.value='至少保留一个启用的截图数据源'; return } if (Object.values(tagEnabled).filter(Boolean).length===0) { error.value='至少保留一个启用的标签数据源'; return } const payload={...systemSettings,metadata_source_priority:JSON.stringify(sourcePriority.value.filter(source=>sourceEnabled[source])),cover_source_priority:JSON.stringify(coverPriority.value.filter(source=>coverEnabled[source])),screenshot_source_priority:JSON.stringify(screenshotPriority.value.filter(source=>screenshotEnabled[source])),tag_source_priority:JSON.stringify(tagPriority.value.filter(source=>tagEnabled[source]))}; await api('/api/settings',{method:'PUT',body:JSON.stringify(payload)}); Object.assign(systemSettings,payload); await load() } catch(e) { error.value=e.message } }
 async function testSettings(kind) { try { alert((await api(`/api/settings/test-${kind}`,{method:'POST'})).ok?'连接成功':'连接失败') } catch(e) { error.value=e.message } }
 async function loadGlossary() { const r=await api('/api/glossary?'+new URLSearchParams({q:glossaryQ.value,category:glossaryCategory.value,page:glossaryPage.value,size:glossarySize.value})); glossary.value=r.items; glossaryTotal.value=r.total }
-async function saveGlossary() { try { const path=glossaryEditing.value?`/api/glossary/${glossaryEditing.value}`:'/api/glossary'; await api(path,{method:glossaryEditing.value?'PUT':'POST',body:JSON.stringify(glossaryDraft)}); Object.assign(glossaryDraft,{source_text:'',target_text:'',category:''});glossaryEditing.value=null;await loadGlossary() } catch(e) { error.value=e.message } }
-async function deleteGlossary(id) { if(confirm('确认删除术语？')) { await api(`/api/glossary/${id}`,{method:'DELETE'});await loadGlossary() } }
-async function importGlossary() { try { await api('/api/glossary/batch',{method:'POST',body:glossaryBatch.value});glossaryBatch.value='';await loadGlossary() } catch(e) { error.value=e.message } }
+async function saveGlossary() { try { const path=glossaryEditing.value?`/api/glossary/${glossaryEditing.value}`:'/api/glossary'; await api(path,{method:glossaryEditing.value?'PUT':'POST',body:JSON.stringify(glossaryDraft)}); Object.assign(glossaryDraft,{source_text:'',target_text:'',category:''});glossaryEditing.value=null;await loadGlossary();await load();await loadTags() } catch(e) { error.value=e.message } }
+async function deleteGlossary(id) { if(confirm('确认删除术语？')) { await api(`/api/glossary/${id}`,{method:'DELETE'});await loadGlossary();await load();await loadTags() } }
+async function importGlossary() { try { await api('/api/glossary/batch',{method:'POST',body:glossaryBatch.value});glossaryBatch.value='';await loadGlossary();await load();await loadTags() } catch(e) { error.value=e.message } }
 
 function toggleTagPanel() { showTagPanel.value=!showTagPanel.value; localStorage.setItem('tag_panel_open',String(showTagPanel.value)) }
 let timer; onMounted(()=>{showTagPanel.value=localStorage.getItem('tag_panel_open')==='true'; const saved=JSON.parse(localStorage.getItem('game-archive-transfer-task') || 'null'); if (saved && ['pending','running'].includes(saved.status)) { transferTask.value=saved; pollTransfer() }; load();loadTags();window.addEventListener('keydown',onPreviewKey);timer=setInterval(()=>{now.value=Date.now();load()},3000)}); onUnmounted(()=>{clearInterval(timer);window.removeEventListener('keydown',onPreviewKey)})

@@ -13,7 +13,7 @@ from ..cover_service import cache_cover
 from ..database import get_db
 from ..models import Game, SystemConfig
 from ..schemas import GameCreate, GameOut, GameUpdate, RefreshMetadataTaskOut
-from ..services import fetch_game_screenshots, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata, search_steam, resolve_tags, get_steam_detail, get_vndb_detail, get_dlsite_detail
+from ..services import fetch_game_screenshots, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata, search_steam, resolve_tags, get_steam_detail, get_vndb_detail, get_dlsite_detail, normalize_release_date
 from ..task_manager import task_manager
 
 router = APIRouter(prefix="/api/games", tags=["games"])
@@ -154,17 +154,18 @@ async def create_game_from_source(
     config = await db.get(SystemConfig, 1)
     if not config:
         config = SystemConfig(id=1)
+    raw_metadata = dict(metadata)  # 翻译前快照：source_data 统一存原文
     try:
         ts = TranslationService()
         metadata = await ts.translate_metadata(db, metadata)
     except Exception as e:
         logger.warning("新增游戏翻译失败：%s", e)
 
-    # 4. 存入 source_data/source_ids
+    # 4. 存入 source_data/source_ids（存翻译前原文）
     source_data = {}
     source_ids = {}
     if source_type != "custom" and source_id:
-        source_data[source_type] = {k: v for k, v in metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
+        source_data[source_type] = {k: v for k, v in raw_metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
         source_ids[source_type] = source_id
 
     # 5. 创建游戏
@@ -178,7 +179,7 @@ async def create_game_from_source(
         description=metadata.get("description", ""),
         developer=metadata.get("developer", ""),
         publisher=metadata.get("publisher", ""),
-        release_date=metadata.get("release_date"),
+        release_date=normalize_release_date(metadata.get("release_date")),
         rating=metadata.get("rating"),
         tags=metadata.get("tags", ""),
         tag_source=source_type,
@@ -228,12 +229,36 @@ async def update_game(game_id: int, payload: GameUpdate, db: AsyncSession = Depe
 
 
 @router.delete("/{game_id}", status_code=204)
-async def delete_game(game_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_game(game_id: int, delete_files: bool = False, db: AsyncSession = Depends(get_db)):
+    """删除游戏记录；delete_files=true 时同时删除 NAS 上的源文件/文件夹。
+
+    安全约束：仅允许删除位于扫描根目录（scan_root / local_game_root）之内的路径，
+    防止构造恶意 resource_url 误删系统文件。
+    """
+    import shutil as _shutil
+
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(404, "游戏不存在")
+    target = None
+    if delete_files and game.resource_type in {"nas_cloud", "nas_local"} and game.resource_url:
+        root = settings.scan_root if game.resource_type == "nas_cloud" else settings.local_game_root
+        path = Path(game.resource_url).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError as exc:
+            raise HTTPException(400, "资源路径不在允许的挂载目录内，已取消删除源文件") from exc
+        # 防呆：不允许直接删除扫描根目录本身
+        if path == root.resolve():
+            raise HTTPException(400, "不允许删除扫描根目录")
+        target = path
     await db.delete(game)
     await db.commit()
+    if target is not None and target.exists():
+        if target.is_dir():
+            await __import__("asyncio").to_thread(_shutil.rmtree, target)
+        else:
+            await __import__("asyncio").to_thread(target.unlink)
 
 
 @router.post("/{game_id}/cover", response_model=GameOut)

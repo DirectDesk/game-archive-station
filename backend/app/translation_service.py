@@ -30,6 +30,19 @@ class TranslationService:
         }
         pass
 
+    @staticmethod
+    def _looks_garbled(source: str, result: str) -> bool:
+        """腾讯翻译君对日文常返回乱码（"Ÿ ðŸ"等 Latin-1 扩展字符）。
+        源含日文假名且结果含 >=2 个 Latin 扩展字符时判定为乱码。
+        """
+        if not result or result == source:
+            return False
+        has_kana = any("\u3040" <= c <= "\u30ff" for c in source)
+        if not has_kana:
+            return False
+        latin_ext = sum(1 for c in result if "\u0080" <= c <= "\u024f")
+        return latin_ext >= 2
+
     async def _google_translate(self, text: str, retries: int = 3) -> str:
         """谷歌翻译（非官方免费接口，带重试退避）"""
         import os as _os
@@ -68,6 +81,12 @@ class TranslationService:
             cached = self.glossary.get((text, "tag")) or self.glossary.get((text, ""))
             if cached:
                 return cached
+            # 含中文（含中英混合如"Steam 云"）且无日文假名的标签不再机翻：
+            # 谷歌接口按 sl=ja 处理，会把官方中文二次翻成"蒸汽云/中国人"等垃圾结果
+            _cn = sum(1 for _ch in text if "\u4e00" <= _ch <= "\u9fff")
+            _kana = any("\u3040" <= _ch <= "\u309f" or "\u30a0" <= _ch <= "\u30ff" for _ch in text)
+            if _cn > 0 and not _kana:
+                return text
             # 谷歌翻译兜底
             translated = await self._google_translate(text)
             if translated and translated != text and db is not None:
@@ -94,6 +113,10 @@ class TranslationService:
             return translated
         try:
             result = await self.translator.translate(text)
+            # 腾讯翻译君对日文乱码检测：回退谷歌翻译
+            if self._looks_garbled(text, result):
+                logger.info("翻译结果疑似乱码，回退谷歌：%s -> %.40s", text, result)
+                result = await self._google_translate(text)
             # 质量校验：标签翻译结果异常时保留原文
             if category == "tag" and result != text:
                 # 1. 长度校验：翻译结果长度 < 原文50%，认为被截断

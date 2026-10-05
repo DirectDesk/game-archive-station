@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .clients.rawg_client import RawgClient
@@ -79,6 +80,90 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
     logger.warning("标签解析失败：game_id=%s，所有来源均无标签，已清空", game.id)
     return ""
 
+
+def normalize_release_date(value):
+    """把各数据源的 release_date（字符串/列表/date）统一为 date 对象或 None。
+    Game.release_date 是 SQLite Date 类型，只接受 Python date 对象。
+    """
+    if not value:
+        return None
+    if isinstance(value, list):
+        value = value[0] if value else None
+        if value is None:
+            return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.split("T")[0].split(" ")[0])
+        except (ValueError, TypeError):
+            return None
+    return None
+
+async def retag_games_from_glossary(db: AsyncSession) -> int:
+    """术语表变更后，把最新的 tag 映射重新应用到所有游戏已持久化的标签上。
+
+    策略：
+    - 仅使用术语表正向映射（source_text -> target_text），不调用翻译器，速度快且无外部依赖。
+    - 优先取原文标签（original_data.tags 快照 / source_data[tag_source].tags），
+      与现有 game.tags 按位置对齐：新译文 = 术语表[原文] or 术语表[现有] or 保留现有译文。
+    - 原文与现有译文数量不一致时，退化为对现有 tags 逐条正向查术语表。
+    返回更新的游戏数量。
+    """
+    await translation_service.load(db)
+    glossary = translation_service.glossary
+
+    def lookup(text: str) -> str:
+        return glossary.get((text, "tag")) or glossary.get((text, "")) or ""
+
+    updated = 0
+    games = list((await db.scalars(select(Game))).all())
+    for game in games:
+        current_tags = (game.tags or "").strip()
+        if not current_tags:
+            continue
+        cur_parts = [part.strip() for part in current_tags.split(",") if part.strip()]
+        # 收集原文标签候选
+        orig_tags = ""
+        try:
+            source_data = json.loads(game.source_data or "{}")
+        except json.JSONDecodeError:
+            source_data = {}
+        src = game.tag_source or game.source_type or ""
+        if src and isinstance(source_data.get(src), dict):
+            orig_tags = source_data[src].get("tags", "") or ""
+        if not orig_tags:
+            try:
+                original = json.loads(game.original_data or "{}")
+            except json.JSONDecodeError:
+                original = {}
+            orig_tags = original.get("tags", "") or ""
+        orig_parts = [part.strip() for part in orig_tags.split(",") if part.strip()] if orig_tags else []
+        def _is_chinese(text: str) -> bool:
+            if not text:
+                return False
+            cn = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+            kana = any("\u3040" <= ch <= "\u30ff" for ch in text)
+            return cn > 0 and not kana
+
+        if orig_parts and len(orig_parts) == len(cur_parts):
+            # 位置对齐：术语表[原文] 优先；原文是中文时直接用原文（中文不再机翻，
+            # 历史上"单人->中国人"等错误译文应被还原）；否则 术语表[现有] 或保留现有
+            new_parts = [
+                lookup(orig) or (orig if _is_chinese(orig) else (lookup(cur) or cur))
+                for orig, cur in zip(orig_parts, cur_parts)
+            ]
+        else:
+            # 数量对不上：只能对现有译文正向查表（覆盖术语表修正/中英互改）
+            new_parts = [lookup(cur) or cur for cur in cur_parts]
+        new_tags = ", ".join(new_parts)
+        if new_tags != current_tags:
+            game.tags = new_tags
+            updated += 1
+    if updated:
+        await db.commit()
+    logger.info("术语表重应用完成：更新 %d 个游戏的标签", updated)
+    return updated
 
 async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_source: str = "") -> list[str]:
     """按配置优先级获取并缓存截图；失败的来源会继续尝试下一个来源。"""
@@ -262,7 +347,7 @@ async def search_vndb(query: str) -> list[dict]:
                 rel_date = released if released else None
             except (ValueError, TypeError):
                 rel_date = None
-            results.append({"source_type": "vndb", "source_id": item.get("id", ""), "title": item.get("title", ""), "alias": item.get("alttitle", ""), "cover_url": (item.get("image") or {}).get("url", ""), "description": item.get("description", ""), "developer": ", ".join(x.get("name", "") for x in item.get("developers", [])), "publisher": "", "release_date": rel_date, "rating": item.get("rating"), "tags": ", ".join(x.get("name", "") for x in item.get("tags", [])), "series": ""})
+            results.append({"source_type": "vndb", "source_id": item.get("id", ""), "title": item.get("title", ""), "alias": item.get("alttitle") or "", "cover_url": (item.get("image") or {}).get("url", ""), "description": item.get("description", ""), "developer": ", ".join(x.get("name", "") for x in item.get("developers", [])), "publisher": "", "release_date": rel_date, "rating": item.get("rating"), "tags": ", ".join(x.get("name", "") for x in item.get("tags", [])), "series": ""})
         return results
 
 
@@ -290,7 +375,8 @@ async def get_vndb_detail(source_id: str) -> dict:
             display_alias = vndb_title
         else:
             display_title = vndb_title
-            display_alias = vndb_alttitle
+            display_alias = vndb_alttitle or ""
+
         return {"source_type": "vndb", "source_id": value.get("id", ""), "title": display_title, "alias": display_alias, "cover_url": (value.get("image") or {}).get("url", ""), "description": value.get("description", ""), "developer": ", ".join(x.get("name", "") for x in value.get("developers", [])), "publisher": "", "release_date": release_date, "rating": value.get("rating"), "tags": ", ".join(x.get("name", "") for x in value.get("tags", [])), "series": "", "screenshots": "", "version": ""}
 
 
@@ -329,9 +415,11 @@ async def refresh_game_metadata(game_id: int) -> None:
             raise RuntimeError("当前数据源不支持刷新元数据")
         # 翻译前保存不参与翻译但需要保留的字段
         _preserved = {k: metadata.get(k) for k in ("english_name", "cover_url", "release_date", "rating", "version") if metadata.get(k) is not None}
+        raw_metadata = dict(metadata)  # 翻译前快照：source_data 统一存原文，供标签重翻译对齐
         metadata = await translation_service.translate_metadata(session, metadata)
         # 翻译后合并回保留字段（翻译服务可能丢失这些字段）
         metadata.update(_preserved)
+        metadata["release_date"] = normalize_release_date(metadata.get("release_date"))
         for field in ("title", "alias", "description", "developer", "publisher", "release_date", "rating", "tags", "series", "source_type", "source_id", "screenshots", "version", "original_data", "steam_appid"):
             if field in metadata:
                 setattr(game, field, metadata[field])
@@ -353,9 +441,9 @@ async def refresh_game_metadata(game_id: int) -> None:
             source_data = json.loads(game.source_data or "{}")
         except json.JSONDecodeError:
             source_data = {}
-        # 主来源数据也存入 source_data
+        # 主来源数据也存入 source_data（存翻译前原文，与其他来源行为一致）
         if game.source_type and game.source_type != "custom":
-            source_data[game.source_type] = {k: v for k, v in metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
+            source_data[game.source_type] = {k: v for k, v in raw_metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
             source_ids[game.source_type] = game.source_id
         # 刷新其他已有来源
         for src, sid in list(source_ids.items()):
@@ -383,9 +471,20 @@ async def refresh_game_metadata(game_id: int) -> None:
             try:
                 if src == "steam":
                     results = await search_steam(game.title)
-                    if results:
-                        source_ids["steam"] = results[0]["source_id"]
-                        source_data["steam"] = await get_steam_detail(results[0]["source_id"])
+                    # storesearch 对 DLC 也返回 type=app，需 appdetails 校验 type=="game"
+                    picked = None
+                    for candidate in results[:5]:
+                        try:
+                            if await SteamClient().get_app_type(candidate["source_id"]) == "game":
+                                picked = candidate
+                                break
+                        except Exception:
+                            continue
+                    if picked is None and results:
+                        picked = results[0]
+                    if picked:
+                        source_ids["steam"] = picked["source_id"]
+                        source_data["steam"] = await get_steam_detail(picked["source_id"])
                 elif src == "rawg":
                     rawg_client = RawgClient()
                     def _filter_main(results):
@@ -442,15 +541,19 @@ async def refresh_vndb_game_metadata(game_id: int) -> None:
         if not game:
             raise RuntimeError("游戏不存在")
 
-        results = await search_vndb(game.title)
-        if not results:
-            raise RuntimeError("VNDB 未找到匹配的游戏")
-        source_id = results[0].get("source_id", "")
+        # 已有 source_id 时精确查询（按标题搜索首结果可能错配，如 'your diary' 搜到 v4470）
+        source_id = game.source_id or ""
         if not source_id:
-            raise RuntimeError("VNDB 搜索结果缺少数据源 ID")
+            results = await search_vndb(game.title)
+            if not results:
+                raise RuntimeError("VNDB 未找到匹配的游戏")
+            source_id = results[0].get("source_id", "")
+            if not source_id:
+                raise RuntimeError("VNDB 搜索结果缺少数据源 ID")
 
         metadata = await get_vndb_detail(source_id)
         metadata = await translation_service.translate_metadata(session, metadata)
+        metadata["release_date"] = normalize_release_date(metadata.get("release_date"))
         for field in (
             "title", "alias", "description", "developer", "publisher", "release_date",
             "rating", "tags", "series", "source_type", "source_id", "screenshots", "version",
@@ -480,12 +583,14 @@ async def refresh_rawg_game_metadata(game_id: int) -> None:
 
         metadata = await RawgClient().get_game_detail(game.source_id)
         metadata = await translation_service.translate_metadata(session, metadata)
+        metadata["release_date"] = normalize_release_date(metadata.get("release_date"))
         for field in (
             "title", "alias", "description", "developer", "publisher", "release_date",
             "rating", "tags", "series", "source_type", "source_id", "screenshots", "version", "original_data",
             "steam_appid",
         ):
-            setattr(game, field, metadata[field])
+            if field in metadata:
+                setattr(game, field, metadata[field])
         # 先保存远程 URL；封面 CDN 临时失败不应使元数据刷新失败。
         game.cover_url = metadata["cover_url"]
         await session.commit()

@@ -56,6 +56,23 @@ class SteamClient:
                 })
             return results
 
+    async def get_app_type(self, appid: str) -> str:
+        """轻量查询 app 类型（game/dlc/music 等）。
+        storesearch 对所有条目都返回 type=app，必须用 appdetails 的 type 字段区分 DLC。
+        """
+        await self._throttle()
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            response = await client.get(
+                self.detail_url,
+                params={"appids": appid, "filters": "type,name"},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            response.raise_for_status()
+            app_data = response.json().get(str(appid), {})
+            if not app_data.get("success"):
+                return ""
+            return (app_data.get("data") or {}).get("type", "")
+
     async def get_game_detail(self, appid: str) -> dict:
         """Steam appdetails 反查，返回完整元数据（中文），english_name 为英文原名。"""
         await self._throttle()

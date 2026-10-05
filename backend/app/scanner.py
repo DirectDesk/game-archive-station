@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from .clients.rawg_client import RawgClient
 from .clients.steam_client import SteamClient
-from .services import resolve_tags
+from .services import resolve_tags, normalize_release_date
 
 def _is_non_main_title(title: str) -> bool:
     """简单内联过滤：标题包含非主游戏关键词返回True。"""
@@ -27,11 +27,133 @@ from .services import fetch_game_screenshots
 logger = logging.getLogger(__name__)
 
 
+class _SkipSearch(Exception):
+    pass
+
+
 class LibraryScanner:
-    """串行目录扫描器：只读取目录条目及目录 mtime，绝不读取游戏文件内容。"""
+    """目录扫描器（参照飞牛影视刮削逻辑）：
+    - 扫描根目录的一级子项（目录或文件）即游戏单位，不再递归深层目录；
+    - 文件夹内含多个有效游戏单元时（过滤文本文件、压缩包分包合并后），
+      按文件夹内的文件名分别刮削；否则按文件夹名刮削。
+    """
+
+    # 忽略的文件类型（文本/图片/字幕/校验文件等，不算游戏）
+    _IGNORE_EXTS = {
+        ".txt", ".md", ".doc", ".docx", ".nfo", ".pdf", ".rtf", ".odt",
+        ".srt", ".ass", ".ssa", ".vtt", ".url", ".htm", ".html",
+        ".ini", ".log", ".csv", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico",
+        ".sfv", ".par2", ".rev", ".db", ".torrent",
+    }
+    # 非游戏附件关键词（补丁/修改器/存档/攻略等，不单独刮削）
+    _NON_GAME_KEYWORDS = (
+        "补丁", "修改器", "存档", "攻略", "原声", "画集", "设定集",
+        "soundtrack", "trainer", "artbook", "wallpaper", ".patch.",
+    )
+    # 压缩包分包命名模式（xxx.part01.rar / xxx.r00 / xxx.z01 / xxx.001 / xxx.7z.001 / xxx.zip.001）
+    _PART_RES = [
+        re.compile(r"(?i)\.part0*\d+\.rar$"),
+        re.compile(r"(?i)\.part0*\d+\.zip$"),
+        re.compile(r"(?i)\.r\d{2,3}$"),
+        re.compile(r"(?i)\.z\d{2,3}$"),
+        re.compile(r"(?i)\.7z\.\d{3}$"),
+        re.compile(r"(?i)\.zip\.\d{2,3}$"),
+        re.compile(r"(?i)\.\d{3}$"),
+    ]
 
     def __init__(self):
         self.running = False
+
+    @classmethod
+    def _unit_key(cls, filename: str) -> str:
+        """游戏单元分组 key：压缩包分包归并到同一 key（去掉分包后缀和扩展名）。"""
+        for pattern in cls._PART_RES:
+            match = pattern.search(filename)
+            if match:
+                return filename[: match.start()].lower()
+        stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+        return stem.lower()
+
+    @classmethod
+    def _is_ignored_file(cls, filename: str) -> bool:
+        """文本/图片等非游戏文件，或补丁/修改器等附件文件。"""
+        lower = filename.lower()
+        ext = ("." + lower.rsplit(".", 1)[1]) if "." in lower else ""
+        # 分包后缀的文件扩展名（.001/.r00）不在忽略表内，先判断扩展名
+        if ext in cls._IGNORE_EXTS:
+            return True
+        stem = lower.rsplit(".", 1)[0]
+        return any(keyword in stem for keyword in cls._NON_GAME_KEYWORDS)
+
+    @classmethod
+    def _group_files(cls, files: list) -> list:
+        """把文件列表按单元 key 分组，返回 [(单元名, 主文件路径, 总大小)]。
+
+        主文件选择：优先无分包标记的压缩包主包（.rar/.zip/.7z/.iso 等），否则组内第一个文件。
+        """
+        groups: dict[str, list] = {}
+        for file_path, size in files:
+            key = cls._unit_key(file_path.name)
+            groups.setdefault(key, []).append((file_path, size))
+        units = []
+        for key, members in groups.items():
+            main = None
+            for file_path, _size in members:
+                name = file_path.name.lower()
+                is_part = any(pattern.search(name) for pattern in cls._PART_RES)
+                if not is_part and name.rsplit(".", 1)[-1] in ("rar", "zip", "7z", "iso", "exe", "msi", "pkg"):
+                    main = file_path
+                    break
+            if main is None:
+                main = members[0][0]
+            total = sum(size for _p, size in members)
+            units.append((main.name, main, total))
+        return units
+
+    @staticmethod
+    async def _list_files_recursive(path: Path) -> list:
+        """递归收集文件夹内所有文件（路径, 大小），只读目录条目。"""
+        def collect():
+            result = []
+            for root_dir, _dirs, filenames in os.walk(path):
+                for filename in filenames:
+                    full = Path(root_dir) / filename
+                    try:
+                        result.append((full, full.stat().st_size))
+                    except OSError:
+                        result.append((full, 0))
+            return result
+
+        return await asyncio.to_thread(collect)
+
+    @classmethod
+    async def _analyze_folder(cls, path: Path) -> list:
+        """分析文件夹内的游戏单元：过滤非游戏文件、压缩包分包合并后按单元分组。"""
+        all_files = await cls._list_files_recursive(path)
+        valid = [(fp, size) for fp, size in all_files if not cls._is_ignored_file(fp.name)]
+        if not valid:
+            return []
+        return cls._group_files(valid)
+
+    @staticmethod
+    async def _entries(path: Path) -> tuple[list, list]:
+        """读取目录的直接子项，返回 (文件列表, 目录列表)。"""
+        def read_entries():
+            files, dirs = [], []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        dirs.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        try:
+                            size = entry.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            size = 0
+                        files.append((Path(entry.path), size))
+            return files, dirs
+
+        return await asyncio.to_thread(read_entries)
 
     @staticmethod
     def _clean_folder_name_for_search(name: str) -> str:
@@ -107,20 +229,56 @@ class LibraryScanner:
                 await db.refresh(config)
             return config
 
-    async def _create_game_from_folder(self, folder: Path, resource_type: str, config: SystemConfig) -> bool:
+    async def _create_game_from_folder(self, folder: Path, resource_type: str, config: SystemConfig, search_name: str | None = None, known_size: int | None = None) -> bool:
         async with SessionLocal() as db:
             # 仅按标准化后的 resource_url 去重；title 会被元数据覆盖，不能用于去重。
             folder_path = str(folder.resolve()).rstrip("/").replace("//", "/")
             exists_id = await db.scalar(select(Game.id).where(Game.resource_url == folder_path))
+            old_deeper = False
+            if not exists_id:
+                # 前缀判重：刮削粒度变更（深层叶子 -> 一级目录 / 文件夹 -> 文件夹内文件）时，
+                # 旧记录路径与新条目路径互为前缀，视为同一游戏，避免重复入库。
+                # 优先级：尾斜杠归一等值 = 旧记录更深 > 旧记录更浅（父路径，最弱仅兜底）。
+                parent_hit = None
+                rows = (await db.execute(select(Game.id, Game.resource_url).where(Game.resource_url != ""))).all()
+                for gid, url in rows:
+                    norm = (url or "").rstrip("/")
+                    if not norm:
+                        continue
+                    if norm == folder_path:
+                        # 尾斜杠差异导致的"假不存在"：归一等值，复用旧记录
+                        exists_id = gid
+                        old_deeper = True  # 顺便把 resource_url 归一化为无尾斜杠
+                        break
+                    if norm.startswith(folder_path + "/"):
+                        # 旧记录更深（旧叶子目录）：更新为新粒度路径，沿用原记录
+                        exists_id = gid
+                        old_deeper = True
+                        break
+                    if folder_path.startswith(norm + "/"):
+                        # 扫描根目录本身的记录不作为"已入库"依据（脏数据）
+                        root_strs = {str(settings.scan_root).rstrip("/"), str(settings.local_game_root).rstrip("/")}
+                        if norm not in root_strs and parent_hit is None:
+                            parent_hit = gid
+                if not exists_id and parent_hit:
+                    exists_id = parent_hit
             if exists_id:
                 exists = await db.get(Game, exists_id)
+                if exists and old_deeper:
+                    exists.resource_url = folder_path
+                    await db.commit()
+                    logger.info("刮削粒度/路径归一：game_id=%s resource_url -> %s", exists.id, folder_path)
                 if exists and (not exists.file_size or exists.file_size == 0):
                     try:
-                        _sz = 0
-                        for _root, _dirs, _files in os.walk(folder_path):
-                            for _f in _files:
-                                try: _sz += os.path.getsize(os.path.join(_root, _f))
-                                except OSError: pass
+                        _sz = known_size or 0
+                        if not _sz:
+                            if os.path.isfile(folder_path):
+                                _sz = os.path.getsize(folder_path)
+                            else:
+                                for _root, _dirs, _files in os.walk(folder_path):
+                                    for _f in _files:
+                                        try: _sz += os.path.getsize(os.path.join(_root, _f))
+                                        except OSError: pass
                         exists.file_size = _sz
                         await db.commit()
                         logger.info("更新游戏容量：game_id=%s, size=%d", exists.id, _sz)
@@ -128,11 +286,37 @@ class LibraryScanner:
                         pass
                 return False
 
-            # 文件夹名是唯一可用的低 IO 发现信息；不进入文件夹读取文件。
+            # 搜索名：文件夹名，或指定的单元名（文件基名，多游戏文件夹情形）
             client = RawgClient()
-            search_name = self._clean_folder_name_for_search(folder.name)
+            raw_name = search_name or folder.name
+            # 文件情形去掉扩展名（如 your diary+h.zip -> your diary+h）
+            if folder.is_file() and "." in raw_name:
+                raw_name = raw_name.rsplit(".", 1)[0]
+            search_name = self._clean_folder_name_for_search(raw_name)
             candidates = []
+            source_type = "rawg"
+            # RJ/VJ/BJ 编号优先 DLsite 精准查询：同人编号是精确 ID，
+            # 先于 RAWG 模糊搜索，避免编号作品被错配（如 NEKOPARA 同人志乱码匹配）
             try:
+                from .clients.dlsite_client import DlsiteClient
+
+                _dlsite_early = DlsiteClient()
+                _workno = _dlsite_early.extract_workno(raw_name)
+                if _workno:
+                    _work = await _dlsite_early.get_work_by_id(_workno)
+                    if _work:
+                        candidates = [{
+                            "source_type": "dlsite",
+                            "source_id": _workno,
+                            "title": _work.get("work_name", ""),
+                        }]
+                        source_type = "dlsite"
+                        logger.info("DLsite 编号精准匹配：%s -> %s (%s)", raw_name, _work.get("work_name", ""), _workno)
+            except Exception:
+                logger.exception("DLsite 编号优先查询失败：%s", raw_name)
+            try:
+                if candidates:
+                    raise _SkipSearch  # 已有 DLsite 精准结果，跳过 RAWG 搜索
                 # page_size=5 取多个结果，按标题相似度过滤，避免不相关结果挡住 vndb
                 for item in await client.search_games(search_name, page_size=5):
                     if _is_non_main_title(item.get("title", "")):
@@ -142,16 +326,17 @@ class LibraryScanner:
                         break
                 # 清洗名无相关结果时，用原始名再试一次
                 if not candidates:
-                    for item in await client.search_games(folder.name, page_size=5):
+                    for item in await client.search_games(raw_name, page_size=5):
                         if _is_non_main_title(item.get("title", "")):
                             continue
-                        if self._title_match(folder.name, item.get("title", "")):
+                        if self._title_match(raw_name, item.get("title", "")):
                             candidates = [item]
                             break
+            except _SkipSearch:
+                pass
             except Exception:
                 logger.exception("RAWG 搜索失败，创建基础游戏记录：%s", folder_path)
                 candidates = []
-            source_type = "rawg"
             if not candidates:
                 # Steam fallback：中文名搜索支持好，appdetails 返回中文元数据
                 try:
@@ -163,7 +348,7 @@ class LibraryScanner:
                     if not steam_results:
                         steam_results = await steam_client.search_games(search_name, page_size=5)
                     if not steam_results:
-                        steam_results = await steam_client.search_games(folder.name, page_size=5)
+                        steam_results = await steam_client.search_games(raw_name, page_size=5)
                     # 过滤掉原声集/DLC等非主游戏结果
                     steam_results = [
                         r for r in steam_results
@@ -174,10 +359,21 @@ class LibraryScanner:
                     logger.exception("Steam fallback 搜索失败：%s", folder_path)
                     steam_results = []
                 if steam_results:
-                    # Steam 搜索按相关性排序，第一个通常即主游戏
-                    candidates = [steam_results[0]]
-                    source_type = "steam"
-                    logger.info("Steam fallback 匹配成功：%s -> %s (appid=%s)", folder.name, steam_results[0].get("title",""), steam_results[0].get("source_id",""))
+                    # storesearch 对 DLC 也返回 type=app，必须用 appdetails 校验 type=="game"
+                    picked = None
+                    for candidate in steam_results[:5]:
+                        try:
+                            if await steam_client.get_app_type(candidate["source_id"]) == "game":
+                                picked = candidate
+                                break
+                        except Exception:
+                            continue
+                    if picked:
+                        candidates = [picked]
+                        source_type = "steam"
+                        logger.info("Steam fallback 匹配成功：%s -> %s (appid=%s)", raw_name, picked.get("title",""), picked.get("source_id",""))
+                    else:
+                        logger.info("Steam fallback 候选均为 DLC 或校验失败，跳过：%s", raw_name)
             if not candidates:
                 try:
                     from .services import search_vndb
@@ -186,7 +382,7 @@ class LibraryScanner:
                     vndb_results = await search_vndb(search_name)
                     if not vndb_results:
                         # 清洗后仍搜不到，用原始名再试一次
-                        vndb_results = await search_vndb(folder.name)
+                        vndb_results = await search_vndb(raw_name)
                 except Exception:
                     logger.exception("VNDB fallback 搜索失败：%s", folder_path)
                     vndb_results = []
@@ -202,7 +398,7 @@ class LibraryScanner:
                     from .clients.dlsite_client import DlsiteClient
 
                     dlsite = DlsiteClient()
-                    workno = dlsite.extract_workno(folder.name)
+                    workno = dlsite.extract_workno(raw_name)
                     dlsite_results = []
                     if workno:
                         # 有编号：精准查询，不做搜索
@@ -218,7 +414,7 @@ class LibraryScanner:
                         # 无编号：关键词搜索
                         dlsite_results = await dlsite.search_games(search_name, page_size=5)
                         if not dlsite_results:
-                            dlsite_results = await dlsite.search_games(folder.name, page_size=5)
+                            dlsite_results = await dlsite.search_games(raw_name, page_size=5)
                 except Exception:
                     logger.exception("DLsite fallback 搜索失败：%s", folder_path)
                     dlsite_results = []
@@ -229,8 +425,8 @@ class LibraryScanner:
                     logger.info("DLsite fallback 匹配成功：%s -> %s (%s)", folder.name, dlsite_results[0].get("title",""), dlsite_results[0].get("source_id",""))
             if not candidates:
                 game = Game(
-                    title=folder.name,
-                    version=(re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", folder.name) or [""])[0],
+                    title=raw_name,
+                    version=(re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", raw_name) or [""])[0],
                     alias="",
                     source_type="custom",
                     source_id="",
@@ -264,62 +460,56 @@ class LibraryScanner:
             except Exception:
                 logger.exception("%s 详情获取失败，创建基础游戏记录：%s", source_type.upper(), folder_path)
                 metadata = {
-                    "title": folder.name,
+                    "title": raw_name,
                     "alias": "",
                     "source_type": "custom",
                     "source_id": "",
                 }
-            version_match = re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", folder.name)
+            version_match = re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", raw_name)
             if version_match and not metadata.get("version"):
                 metadata["version"] = version_match.group(0)
+            raw_metadata = dict(metadata)  # 翻译前快照
             metadata = await translation_service.translate_metadata(db, metadata)
             metadata.setdefault("source_type", source_type)
-            # 把该数据源的标签存入 original_data，供标签数据源优先级选择
-            if metadata.get("tags"):
+            # 把该数据源的原文标签存入 original_data，供标签数据源优先级选择
+            if raw_metadata.get("tags"):
                 try:
                     orig = json.loads(metadata.get("original_data") or "{}")
                 except json.JSONDecodeError:
                     orig = {}
-                orig[f"{source_type}_tags"] = metadata["tags"]
+                orig[f"{source_type}_tags"] = raw_metadata["tags"]
                 metadata["original_data"] = json.dumps(orig, ensure_ascii=False)
             # 构建 source_data/source_ids：主来源数据存入，其他来源待刷新时补充
             _sd = {}
             _sids = {}
             if source_type and source_type != "custom":
-                # 主来源的完整 metadata（翻译后）存入 source_data
-                _sd[source_type] = {k: v for k, v in metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
+                # 主来源的完整 metadata（翻译前原文）存入 source_data
+                _sd[source_type] = {k: v for k, v in raw_metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
                 _sids[source_type] = candidates[0].get("source_id", "")
             # 如果主来源同步到了 steam_appid，补充 steam 来源ID
             if metadata.get("steam_appid") and "steam" not in _sids:
                 _sids["steam"] = metadata["steam_appid"]
             metadata["source_data"] = json.dumps(_sd, ensure_ascii=False)
             metadata["source_ids"] = json.dumps(_sids, ensure_ascii=False)
-            # 计算文件夹大小
-            _dir_size = 0
-            try:
-                for _root, _dirs, _files in os.walk(folder_path):
-                    for _f in _files:
-                        try: _dir_size += os.path.getsize(os.path.join(_root, _f))
-                        except OSError: pass
-            except Exception:
-                pass
+            # 计算资源大小（文件夹递归 / 单文件 / 已知的单元合计）
+            _dir_size = known_size or 0
+            if not _dir_size:
+                try:
+                    if os.path.isfile(folder_path):
+                        _dir_size = os.path.getsize(folder_path)
+                    else:
+                        for _root, _dirs, _files in os.walk(folder_path):
+                            for _f in _files:
+                                try: _dir_size += os.path.getsize(os.path.join(_root, _f))
+                                except OSError: pass
+                except Exception:
+                    pass
             metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite", "file_size": _dir_size})
             # 过滤掉 Game 模型不存在的字段（如 steam 的 english_name 等），避免创建时报错
             _valid_fields = {column.name for column in Game.__table__.columns}
             metadata = {k: v for k, v in metadata.items() if k in _valid_fields}
-            # release_date 是 Date 类型，需要转成 date 对象
-            # 可能是字符串、列表（DLsite返回 ['2026-09-26', '00:00:00']）、或已是 date 对象
-            _rd = metadata.get("release_date")
-            if _rd:
-                if isinstance(_rd, list):
-                    _rd = _rd[0] if _rd else None
-                if isinstance(_rd, str):
-                    try:
-                        metadata["release_date"] = date.fromisoformat(_rd.split("T")[0].split(" ")[0])
-                    except (ValueError, TypeError):
-                        metadata["release_date"] = None
-                elif not isinstance(_rd, date):
-                    metadata["release_date"] = None
+            # release_date 统一归一化为 date 对象（字符串/列表/date 均兼容）
+            metadata["release_date"] = normalize_release_date(metadata.get("release_date"))
             game = Game(**metadata)
             try:
                 await resolve_tags(game, config, "", db)
@@ -349,34 +539,51 @@ class LibraryScanner:
                 raise RuntimeError(f"扫描根目录不可访问：{settings.scan_root}")
             config = await self._get_config()
             last_scan_at = None if full else config.last_scan_at
-            stack = available_roots[:]
-            while stack:
-                directory, resource_type = stack.pop()
+            for root, resource_type in available_roots:
                 try:
-                    directory_mtime = await self._mtime(directory)
-                    # mtime 剪枝策略：
-                    # - nas_cloud（百度网盘挂载）：mtime 不可靠（新增文件不更新父目录mtime），不剪枝
-                    # - nas_local（本地目录）：mtime 可靠，正常剪枝
-                    # - 根路径：总是遍历
-                    is_root = directory in {root for root, _ in available_roots}
-                    can_skip_by_mtime = (not is_root) and (resource_type == "nas_local")
-                    if can_skip_by_mtime and last_scan_at and directory_mtime <= last_scan_at.timestamp():
-                        task["skipped_directories"] += 1
-                        continue
-                    children = await self._directories(directory)
+                    files, dirs = await self._entries(root)
                 except OSError as exc:
-                    logger.exception("读取 WebDAV 目录失败，停止扫描：%s", directory)
-                    raise RuntimeError(f"WebDAV 目录读取失败：{exc}") from exc
-
+                    logger.exception("读取扫描根目录失败，停止扫描：%s", root)
+                    raise RuntimeError(f"扫描根目录读取失败：{exc}") from exc
                 task["scanned_directories"] += 1
-                task["logs"] = (task["logs"] + [f"已读取：{directory}"])[-20:]
-                # 叶子目录视为游戏目录，避免读取其中的游戏文件。
-                if not children and directory not in {root for root, _ in available_roots}:
-                    if await self._create_game_from_folder(directory, resource_type, config):
+                task["logs"] = (task["logs"] + [f"已读取：{root}"])[-20:]
+
+                # 根目录下的直接文件：过滤后按单元分组（分包合并），每个单元一个游戏
+                file_units = self._group_files([(fp, size) for fp, size in files if not self._is_ignored_file(fp.name)])
+                for unit_name, unit_path, unit_size in file_units:
+                    if await self._create_game_from_folder(unit_path, resource_type, config, search_name=unit_name, known_size=unit_size):
                         task["discovered_games"] += 1
-                else:
-                    stack.extend((child, resource_type) for child in children)
-                await asyncio.sleep(settings.scan_throttle_ms / 1000)
+                    await asyncio.sleep(settings.scan_throttle_ms / 1000)
+
+                # 根目录下一级目录：游戏单位（参照飞牛影视）
+                for directory in dirs:
+                    # mtime 剪枝：nas_cloud 不剪枝（挂载目录 mtime 不可靠）；nas_local 正常剪枝
+                    if resource_type == "nas_local" and last_scan_at:
+                        try:
+                            if (await self._mtime(directory)) <= last_scan_at.timestamp():
+                                task["skipped_directories"] += 1
+                                continue
+                        except OSError:
+                            pass
+                    task["scanned_directories"] += 1
+                    task["logs"] = (task["logs"] + [f"已读取：{directory}"])[-20:]
+                    try:
+                        units = await self._analyze_folder(directory)
+                    except OSError as exc:
+                        logger.warning("分析文件夹失败，按文件夹名刮削：%s (%s)", directory, exc)
+                        units = []
+                    if len(units) > 1:
+                        # 文件夹下有多个游戏：按文件夹内文件名分别刮削
+                        logger.info("文件夹含 %d 个游戏单元，按文件名分别刮削：%s", len(units), directory)
+                        for unit_name, unit_path, unit_size in units:
+                            if await self._create_game_from_folder(unit_path, resource_type, config, search_name=unit_name, known_size=unit_size):
+                                task["discovered_games"] += 1
+                            await asyncio.sleep(settings.scan_throttle_ms / 1000)
+                    else:
+                        # 0/1 个游戏单元：按文件夹名刮削
+                        if await self._create_game_from_folder(directory, resource_type, config):
+                            task["discovered_games"] += 1
+                        await asyncio.sleep(settings.scan_throttle_ms / 1000)
 
             # 仅完整、无错误的扫描才推进时间戳，避免失败后遗漏目录。
             async with SessionLocal() as db:

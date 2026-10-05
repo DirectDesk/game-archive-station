@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_db
 from ..schemas import GlossaryCreate, GlossaryOut, GlossaryUpdate
 from ..translation_service import translation_service
+from ..services import retag_games_from_glossary
 from ..config import settings
 import json as _json
 from pathlib import Path
@@ -22,7 +23,9 @@ async def list_glossary(category: str = "", q: str = "", page: int = Query(1, ge
 @router.post("", response_model=GlossaryOut)
 async def add_glossary(payload: GlossaryCreate, db: AsyncSession = Depends(get_db)):
     try:
-        return await translation_service.add(db, payload.model_dump())
+        item = await translation_service.add(db, payload.model_dump())
+        await retag_games_from_glossary(db)
+        return item
     except IntegrityError as exc:
         await db.rollback()
         raise HTTPException(409, "原文术语已存在") from exc
@@ -32,6 +35,7 @@ async def add_glossary(payload: GlossaryCreate, db: AsyncSession = Depends(get_d
 async def update_glossary(item_id: int, payload: GlossaryUpdate, db: AsyncSession = Depends(get_db)):
     try:
         item = await translation_service.update(db, item_id, payload.model_dump())
+        await retag_games_from_glossary(db)
     except IntegrityError as exc:
         await db.rollback()
         raise HTTPException(409, "原文术语已存在") from exc
@@ -44,12 +48,15 @@ async def update_glossary(item_id: int, payload: GlossaryUpdate, db: AsyncSessio
 async def delete_glossary(item_id: int, db: AsyncSession = Depends(get_db)):
     if not await translation_service.delete(db, item_id):
         raise HTTPException(404, "术语不存在")
+    await retag_games_from_glossary(db)
 
 
 @router.post("/batch", response_model=list[GlossaryOut])
 async def batch_add_glossary(payload: list[GlossaryCreate], db: AsyncSession = Depends(get_db)):
     try:
-        return await translation_service.batch_add(db, [item.model_dump() for item in payload])
+        items = await translation_service.batch_add(db, [item.model_dump() for item in payload])
+        await retag_games_from_glossary(db)
+        return items
     except IntegrityError as exc:
         await db.rollback()
         raise HTTPException(409, "批量术语导入失败") from exc
