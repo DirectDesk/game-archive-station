@@ -222,6 +222,68 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
     return ""
 
 
+async def resolve_cover(game: Game, config: SystemConfig, requested_source: str = "") -> tuple[str, str]:
+    """按配置优先级（cover_source_priority）从已收集的各来源封面中选一个。
+
+    返回 (cover_url, source)；无可用封面时返回 ("", "")。
+
+    设计说明（v1.6.4 修复）：
+      旧逻辑里 game.cover_source 直接等于 game.source_type（主来源），
+      导致"封面数据源"这个设置项在扫描/刷新流程中完全失效——
+      即便配置了 steam 优先，只要主来源是 rawg，封面就永远是 rawg 的。
+      本函数与 resolve_tags 对称，统一从 source_data 里按优先级取封面。
+
+    steam 特殊处理：
+      Steam 封面 URL 可由 appid 直接构造（library_600x900.jpg），
+      即使 source_data 里没存 steam 封面（如仅从 rawg 反查到 appid），
+      只要拿到 appid 就优先用 Steam 封面——这正是"steam 封面优先"的预期行为。
+    """
+    try:
+        priority = json.loads(config.cover_source_priority or "[]") if config else []
+    except (TypeError, json.JSONDecodeError):
+        priority = []
+    if not priority:
+        priority = ["steam", "vndb", "dlsite", "rawg"]
+    if requested_source:
+        priority = [requested_source]
+
+    try:
+        source_data = json.loads(game.source_data or "{}")
+    except (TypeError, json.JSONDecodeError):
+        source_data = {}
+    if not isinstance(source_data, dict):
+        source_data = {}
+
+    # 可用来源 = source_data 里已匹配的来源
+    available = set(source_data.keys())
+    # Steam 额外放行：只要游戏持有 steam_appid 就可用 Steam 封面。
+    # 例：孢子(id=22) 由 rawg 匹配，source_data 只有 rawg，
+    #     但 rawg 详情返回了 steam_appid=17390，此时仍应用 Steam 封面。
+    #     若要求 source_data 必须有 steam 条目，会白白丢掉"steam 优先"。
+    _has_steam_appid = bool(str(game.steam_appid or "").strip())
+
+    for source in priority:
+        if source not in available and not (source == "steam" and _has_steam_appid):
+            continue
+        url = ""
+        meta = source_data.get(source)
+        if isinstance(meta, dict):
+            url = meta.get("cover_url", "") or ""
+        # steam：无封面 URL 时按 appid 构造
+        if not url and source == "steam":
+            appid = ""
+            if isinstance(meta, dict):
+                appid = meta.get("steam_appid") or meta.get("source_id") or ""
+            if not appid:
+                appid = str(game.steam_appid or "")
+            if appid:
+                url = RawgClient.steam_cover_url(appid)
+        if url:
+            return url, source
+
+    return "", ""
+
+
 # 常见中文别名 -> 英文名，用于跨数据源搜索（跨源搜索通用增强）
 _ALIAS_MAP = {
     "帝国时代": "Age of Empires",
@@ -1502,11 +1564,14 @@ async def refresh_game_metadata(game_id: int) -> None:
         for field in ("alias", "description", "developer", "publisher", "release_date", "rating", "tags", "series", "source_type", "source_id", "screenshots", "version", "original_data", "steam_appid"):
             if field in metadata:
                 setattr(game, field, metadata[field])
-        game.cover_url = metadata.get("cover_url", "")
+        # 封面按 cover_source_priority 选取（而非直接跟随主来源）
+        _cfg = await session.get(SystemConfig, 1)
+        _cover_url, _cover_src = await resolve_cover(game, _cfg)
+        game.cover_url = _cover_url or metadata.get("cover_url", "")
         await session.commit()
         try:
-            game.cover_url = await cache_cover(game.id, metadata.get("cover_url", ""), game.source_type)
-            game.cover_source = game.source_type
+            game.cover_url = await cache_cover(game.id, game.cover_url, _cover_src or game.source_type)
+            game.cover_source = _cover_src or game.source_type
             await session.commit()
         except Exception:
             await session.rollback()
@@ -2001,8 +2066,6 @@ async def apply_match(game_id: int, source_type: str, source_id: str, set_primar
                           "source_id", "screenshots", "version", "original_data", "steam_appid"):
                 if field in metadata:
                     setattr(game, field, metadata[field])
-            game.cover_url = metadata.get("cover_url", "")
-            game.cover_source = source_type
             game.source_type = source_type
             game.source_id = source_id
             game.tag_source = source_type
@@ -2014,8 +2077,14 @@ async def apply_match(game_id: int, source_type: str, source_id: str, set_primar
         await session.commit()
 
         if set_primary:
+            # 注意：必须在 game.source_data 赋值之后再解析封面，
+            # 否则 resolve_cover 读不到本次新写入的来源封面。
+            _cfg = await session.get(SystemConfig, 1)
+            _cover_url, _cover_src = await resolve_cover(game, _cfg)
             try:
-                game.cover_url = await cache_cover(game.id, metadata.get("cover_url", ""), source_type)
+                _final = _cover_url or metadata.get("cover_url", "")
+                game.cover_url = await cache_cover(game.id, _final, _cover_src or source_type)
+                game.cover_source = _cover_src or source_type
                 await session.commit()
             except Exception:
                 await session.rollback()
@@ -2148,8 +2217,11 @@ async def refresh_vndb_game_metadata(game_id: int) -> None:
         await session.commit()
 
         try:
-            game.cover_url = await cache_cover(game.id, metadata.get("cover_url", ""), "vndb")
-            game.cover_source = "vndb"
+            _cfg = await session.get(SystemConfig, 1)
+            _cover_url, _cover_src = await resolve_cover(game, _cfg)
+            _final = _cover_url or metadata.get("cover_url", "")
+            game.cover_url = await cache_cover(game.id, _final, _cover_src or "vndb")
+            game.cover_source = _cover_src or "vndb"
             await session.commit()
         except Exception:
             await session.rollback()
@@ -2178,14 +2250,17 @@ async def refresh_rawg_game_metadata(game_id: int) -> None:
         game.cover_url = metadata["cover_url"]
         await session.commit()
 
-        steam_url = ""
-        if metadata.get("steam_appid"):
-            steam_url = RawgClient.steam_cover_url(metadata["steam_appid"])
-        cover_url = steam_url or metadata["cover_url"]
-        cover_source = "steam" if steam_url else "rawg"
+        # 原实现硬编码「有 appid 就用 steam 封面」，现改为统一走 cover_source_priority。
+        # 由于 rawg 详情里能拿到 steam_appid，resolve_cover 对 steam 分支做了
+        # 「有 appid 即构造封面 URL」的处理，因此默认优先级(steam 在前)行为不变，
+        # 但用户把 rawg 拖到 steam 之前时也能正确生效。
         try:
-            game.cover_url = await cache_cover(game.id, cover_url, cover_source)
-            game.cover_source = cover_source
+            _cfg = await session.get(SystemConfig, 1)
+            _cover_url, _cover_src = await resolve_cover(game, _cfg)
+            _final = _cover_url or metadata["cover_url"]
+            _src = _cover_src or "rawg"
+            game.cover_url = await cache_cover(game.id, _final, _src)
+            game.cover_source = _src
             await session.commit()
         except Exception:
             await session.rollback()
