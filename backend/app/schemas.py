@@ -122,7 +122,7 @@ class SettingsUpdate(BaseModel):
     download_dir: str | None = Field(default=None, max_length=500)
     rawg_api_key: str | None = Field(default=None, max_length=200)
     auto_translate: bool | None = None
-    translator_type: Literal["none", "tencent"] | None = None
+    translator_type: Literal["none", "tencent", "google"] | None = None
     tencent_secret_id: str | None = Field(default=None, max_length=200)
     tencent_secret_key: str | None = Field(default=None, max_length=200)
     tencent_region: str | None = Field(default=None, max_length=50)

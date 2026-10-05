@@ -8,6 +8,10 @@ from sqlalchemy import select, text
 
 from .config import settings
 from .database import Base, SessionLocal, engine
+from .net import patch_httpx_retry
+
+# 启用全局 HTTP 重试：NAS 宿主机 DNS 偶发失败（[Errno -3] Try again）时自愈
+patch_httpx_retry()
 from .models import Game, SystemConfig
 from .routers import downloads, games, glossary, metadata, scans, settings as settings_router
 from .scheduler import scan_scheduler

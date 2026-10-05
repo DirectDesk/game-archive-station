@@ -5,6 +5,8 @@ from datetime import date
 
 import httpx
 
+from ..net import get_with_retry
+
 
 class SteamClient:
     """Steam 数据源客户端：商店搜索 + appdetails 反查。
@@ -31,7 +33,8 @@ class SteamClient:
         """Steam 商店搜索，支持中文名。返回统一格式列表。"""
         await self._throttle()
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            response = await client.get(
+            response = await get_with_retry(
+                client,
                 self.search_url,
                 params={"term": query, "l": "schinese", "cc": "cn"},
                 headers={"User-Agent": "Mozilla/5.0"},
@@ -62,9 +65,11 @@ class SteamClient:
         """
         await self._throttle()
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            response = await client.get(
+            response = await get_with_retry(
+                client,
                 self.detail_url,
-                params={"appids": appid, "filters": "type,name"},
+                # 注意：Steam 已不再支持 filters=type,name（返回空 data）；使用 filters=basic 才能拿到 type
+                params={"appids": appid, "filters": "basic"},
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             response.raise_for_status()
@@ -77,7 +82,8 @@ class SteamClient:
         """Steam appdetails 反查，返回完整元数据（中文），english_name 为英文原名。"""
         await self._throttle()
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            response = await client.get(
+            response = await get_with_retry(
+                client,
                 self.detail_url,
                 params={"appids": appid, "l": "schinese", "cc": "cn"},
                 headers={"User-Agent": "Mozilla/5.0"},

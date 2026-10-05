@@ -81,6 +81,344 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
     return ""
 
 
+# 常见中文别名 -> 英文名，用于跨数据源搜索（跨源搜索通用增强）
+_ALIAS_MAP = {
+    "帝国时代": "Age of Empires",
+    "帝国时代2": "Age of Empires II",
+    "兰斯": "Rance",
+    "兰斯3": "Rance 3",
+    "兰斯10": "Rance 10",
+    "最终幻想": "Final Fantasy",
+    "生化危机": "Resident Evil",
+    "塞尔达传说": "The Legend of Zelda",
+    "女神异闻录": "Persona",
+    "真三国无双": "Dynasty Warriors",
+    "合金装备": "Metal Gear Solid",
+    "巫师": "The Witcher",
+    "上古卷轴": "The Elder Scrolls",
+    "使命召唤": "Call of Duty",
+    "战地": "Battlefield",
+    "模拟人生": "The Sims",
+    "暗黑破坏神": "Diablo",
+    "星际争霸": "StarCraft",
+    "魔兽争霸": "Warcraft",
+    "刺客信条": "Assassin's Creed",
+    "孤岛惊魂": "Far Cry",
+    "看门狗": "Watch Dogs",
+    "荒野大镖客": "Red Dead Redemption",
+    "战神": "God of War",
+    "神秘海域": "Uncharted",
+    "地平线": "Horizon",
+    "死亡搁浅": "Death Stranding",
+    "尼尔": "NieR",
+    "如龙": "Yakuza",
+    "只狼": "Sekiro",
+    "黑暗之魂": "Dark Souls",
+    "艾尔登法环": "Elden Ring",
+    "鬼泣": "Devil May Cry",
+    "忍者龙剑传": "Ninja Gaiden",
+    "仁王": "Nioh",
+    "拳皇": "The King of Fighters",
+    "街头霸王": "Street Fighter",
+    "铁拳": "Tekken",
+    "塞尔达": "Zelda",
+    "牧场物语": "Story of Seasons",
+    "符文工房": "Rune Factory",
+    "炼金工房": "Atelier",
+    "弹丸论破": "Danganronpa",
+    "逆转裁判": "Ace Attorney",
+    "命运石之门": "Steins;Gate",
+    "秋之回忆": "Memories Off",
+    "沙耶之歌": "Saya no Uta",
+    "白色相簿": "White Album",
+    "月姬": "Tsukihime",
+    "寒蝉鸣泣之时": "Higurashi",
+    "海猫鸣泣之时": "Umineko",
+    "缘之空": "Yosuga no Sora",
+    "日在校园": "School Days",
+    "恋姬无双": "Koihime Musou",
+    "千恋万花": "Senren Banka",
+    "魔女的夜宴": "Sabbat of the Witch",
+    "图书馆": "Library",
+    "三国志": "Romance of the Three Kingdoms",
+    "信长之野望": "Nobunaga's Ambition",
+    "太阁立志传": "Taiko Risshiden",
+    "樱花大战": "Sakura Wars",
+    "梦幻模拟战": "Langrisser",
+    "火焰纹章": "Fire Emblem",
+    "异度之刃": "Xenoblade",
+    "异度神剑": "Xenoblade",
+    "勇者斗恶龙": "Dragon Quest",
+    "真女神转生": "Shin Megami Tensei",
+    "怪物猎人": "Monster Hunter",
+    "逆转检事": "Ace Attorney Investigations",
+    "弹丸": "Danganronpa",
+    "女神异闻录5": "Persona 5",
+    "P5": "Persona 5",
+    # 日系 / galgame / 常见系列（Steam/VNDB 英文名）
+    "兰斯": "Rance",
+    "性感沙滩": "Sexy Beach",
+    "性感海滩": "Sexy Beach",
+    "沙滩": "Sexy Beach",
+    "尾行": "Biko",
+    "欲望之血": "Des Blood",
+    "电车之狼": "RapeLay",
+    "人工少女": "Artificial Girl",
+    "同校生": "Schoolmate",
+    "真实女友": "Real Kanojo",
+    "欲望格斗": "Battle Raper",
+    "苍之彼方的四重奏": "Aokana",
+    "千恋": "Senren Banka",
+    "魔女的夜宴": "Sabbat of the Witch",
+    "夏空": "Natsuzora",
+    "星空": "Hoshizora",
+    "大图书馆的牧羊人": "The Sheep Herders of the Great Library",
+    "悠之空": "Haru no Sora",
+    "天神乱漫": "Tenshi no Nichou",
+    "DRACU-RIOT": "DRACU-RIOT",
+    "夏空彼方": "Natsuzora Kanata",
+    "魔女夜宴": "Sabbat of the Witch",
+    "樱之诗": "Sakura no Uta",
+    "樱之刻": "Sakura no Toki",
+    "白色相簿2": "White Album 2",
+    "悠久之翼": "ef - a fairy tale of the two",
+    "CLANNAD": "CLANNAD",
+    "AIR": "AIR",
+    "Kanon": "Kanon",
+    "Little Busters": "Little Busters",
+    "Rewrite": "Rewrite",
+    "Summer Pockets": "Summer Pockets",
+    "Angel Beats": "Angel Beats",
+    "智代": "Tomoyo After",
+    "智代后记": "Tomoyo After",
+    "星之梦": "Planetarian",
+    "Little Busters!": "Little Busters",
+    "ef": "ef - a fairy tale of the two",
+    "eden": "eden*",
+    "G弦上的魔王": "G-senjou no Maou",
+    "车轮之国": "Sharin no Kuni",
+    "秽翼的尤斯蒂娅": "Eustia",
+    "遥仰凰华": "Haruka na Sora",
+    "恋爱选举与巧克力": "Koi to Senkyo to Chocolate",
+    "初雪樱": "Hatsuyuki Sakura",
+    "纸上的魔法使": "Kami-sama no You na Kimi e",
+    "纸魔": "Kami-sama no You na Kimi e",
+    "ATRI": "ATRI -My Dear Moments-",
+    "苍之彼方": "Aokana",
+    "牛顿与苹果树": "Newton and the Apple Tree",
+    "宿星": "Sukimazakura to Uso no Machi",
+    "Fate": "Fate/stay night",
+    "Fate/stay night": "Fate/stay night",
+    "月姫": "Tsukihime",
+    "魔法使之夜": "Mahoutsukai no Yoru",
+    "魔法师之夜": "Mahoutsukai no Yoru",
+    "空之境界": "Kara no Kyoukai",
+    "恋爱随意链接": "Kokoro Connect",
+    "银魂": "Gintama",
+    "绯月": "Hiiro",
+}
+
+
+def normalize_core(text: str) -> str:
+    """提取标题核心：去掉副标题分隔符后的部分、括号内容、年份、场景组后缀。"""
+    if not text:
+        return ""
+    value = text
+    # 去掉方括号/圆括号内容（发布组、年份、汉化组等）
+    value = re.sub(r"\[[^\]]*\]", " ", value)
+    value = re.sub(r"[\(（][^\)）]*[\)）]", " ", value)
+    # 去掉年份/编号样式（[111229]、20141230）
+    value = re.sub(r"\b\d{6,8}\b", " ", value)
+    # 副标题分隔符统一（冒号/破折号/波浪号/中点）
+    value = re.split(r"[:：\-—–~～]|(?<=\w)\s+[·・]\s*(?=\w)", value, maxsplit=1)[0]
+    # 去版本号
+    value = re.sub(r"(?i)\bv\d+(?:\.\d+){1,3}\b", " ", value)
+    value = re.sub(r"[._]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+# 中文/日文版本后缀（剥离后得到"游戏主体名"，提升跨源命中率）
+_EDITION_SUFFIXES = [
+    "决定版", "決定版", "重制版", "重置版", "重製版", "高清版", "高畫質版", "复刻版", "復刻版",
+    "完整版", "完全版", "豪华版", "豪華版", "终极版", "終極版", "典藏版", "珍藏版", "限定版",
+    "增强版", "加強版", "年度版", "年度遊戲版", "周年纪念版", "紀念版", "导演剪辑版", "導剪版",
+    "终极", "合集", "合辑", "全集", "汉化版", "漢化版", "中文版", "正式版", "抢先体验版",
+    "definitive edition", "remastered", "remake", "complete edition", "deluxe edition",
+    "ultimate edition", "enhanced edition", "game of the year edition", "goty edition",
+    "anniversary edition", "special edition", "collector's edition", "hd edition",
+    "the complete edition", "final edition",
+]
+
+# 阿拉伯数字 -> 罗马数字
+_ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI", 7: "VII", 8: "VIII", 9: "IX", 10: "X",
+          11: "XI", 12: "XII", 13: "XIII", 14: "XIV", 15: "XV"}
+
+
+def _strip_edition(text: str) -> str:
+    """剥离版本后缀，得到游戏主体名。"""
+    if not text:
+        return ""
+    value = text
+    for suffix in _EDITION_SUFFIXES:
+        value = re.sub(re.escape(suffix), " ", value, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _num_variants(text: str) -> list[str]:
+    """为标题中的数字生成变体：2 -> II / 02 / 2（解决 'Rance 3' vs 'Rance 03'）。"""
+    out = []
+
+    def repl(match):
+        n = int(match.group(1))
+        variants = {match.group(0)}
+        variants.add("%02d" % n)  # 3 -> 03
+        variants.add(str(n))       # 03 -> 3
+        if n in _ROMAN:
+            variants.add(_ROMAN[n])  # 3 -> III
+        return variants
+
+    # 逐个数字位置生成组合（最多 3 个数字，避免组合爆炸）
+    positions = list(re.finditer(r"\b(\d{1,2})\b", text))
+    if not positions:
+        return []
+    from itertools import product
+    groups = []
+    for m in positions[:3]:
+        n = int(m.group(1))
+        variants = {m.group(0)}
+        variants.add("%02d" % n)
+        variants.add(str(n))
+        if n in _ROMAN:
+            variants.add(_ROMAN[n])
+        groups.append(list(variants))
+    for combo in product(*groups):
+        value = text
+        for m, rep in reversed(list(zip(positions[:3], combo))):
+            value = value[:m.start()] + rep + value[m.end():]
+        out.append(value)
+    return out
+
+
+def _alias_hit(key: str, haystack: str) -> bool:
+    """别名命中判定：
+    - 含 CJK 的 key：直接子串匹配（中文无词边界问题）；
+    - 纯 ASCII 的短 key（如 ef / p5 / air）：必须作为独立词出现，避免 'ef' 命中 'definitive'；
+    - 其余 ASCII key：要求词边界匹配。
+    """
+    if not key or not haystack:
+        return False
+    if re.search(r"[\u4e00-\u9fff\u3040-\u30ff]", key):
+        return key in haystack
+    return re.search(r"(?<![a-z0-9])" + re.escape(key) + r"(?![a-z0-9])", haystack) is not None
+
+
+def alias_candidates(text: str) -> list[str]:
+    """由（中文）标题生成跨源搜索候选。
+    策略：命中别名表时，剥离中文版本后缀后组合英文名；再对数字生成罗马/补零变体。
+    产出顺序：最精确 -> 最宽泛，调用方按顺序尝试即可。
+    """
+    if not text:
+        return []
+    cleaned = normalize_core(text) or (text or "").lower()
+    base = _strip_edition(cleaned)          # 已剥离版本后缀的核心名
+    base_raw = _strip_edition(text or "")
+    out = []
+    for cn, en in _ALIAS_MAP.items():
+        key = cn.lower()
+        if _alias_hit(key, cleaned) or _alias_hit(key, (text or "").lower()):
+            # 去掉中文别名后剩下的部分（可能是数字/版本，如 "帝国时代2决定版" -> "2"）
+            rest = base.replace(key, " ").strip()
+            rest = re.sub(r"\s+", " ", rest).strip()
+            # rest 里若只剩中文/标点则忽略，避免 "Age of Empires 2决定版" 这类垃圾候选
+            rest = re.sub(r"[\u4e00-\u9fff]+", " ", rest).strip()
+            if rest:
+                cand = f"{en} {rest}".strip()
+                out.append(cand)
+                out.extend(_num_variants(cand))
+            out.append(en)
+            out.extend(_num_variants(en))
+    # 未命中别名表：用剥离版本后缀后的原名（对英文标题尤其有效，如 "Age of Empires II: DE"）
+    if not out:
+        if base_raw and base_raw.lower() != (text or "").lower():
+            out.append(base_raw)
+        out.extend(_num_variants(base_raw))
+    # 去重保序（忽略大小写与多余空格）
+    seen, result = set(), []
+    for item in out:
+        item = re.sub(r"\s+", " ", item).strip()
+        if len(item) < 2:
+            continue
+        low = item.lower()
+        if low not in seen:
+            seen.add(low)
+            result.append(item)
+    return result
+
+
+def _series_numbers(text: str) -> set[str]:
+    """提取标题中的"作品序号"数字（含罗马数字归一化），用于系列作区分。
+    如 "Sexy Beach 4" -> {"4"}，"Age of Empires II" -> {"2"}，"兰斯 03" -> {"3"}。
+    """
+    if not text:
+        return set()
+    nums: set[str] = set()
+    # 阿拉伯数字
+    for m in re.finditer(r"(?<![a-z0-9])(\d{1,2})(?![a-z0-9])", text):
+        nums.add(str(int(m.group(1))))
+    # 罗马数字（独立词）
+    for m in re.finditer(r"(?<![a-z0-9])([ivx]{1,4})(?![a-z0-9])", text.lower()):
+        val = _roman_to_int(m.group(1))
+        if val is not None:
+            nums.add(str(val))
+    return nums
+
+
+def _roman_to_int(token: str) -> int | None:
+    roman = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100}
+    if not token or any(ch not in roman for ch in token):
+        return None
+    total, prev = 0, 0
+    for ch in reversed(token):
+        val = roman[ch]
+        if val < prev:
+            total -= val
+        else:
+            total += val
+            prev = val
+    # 只认可 <= 30 的小序号（避免把 "mix"/"civil" 等误判为罗马数字）
+    return total if 1 <= total <= 30 else None
+
+
+def title_similarity(query: str, result_title: str) -> float:
+    """双向包含 + 词元重叠的相似度：query 是结果标题的一部分（或反之）时高分。
+    额外规则：若两侧的"作品序号"不同（如 4 vs 2、4 vs 无），判定为不同作品，分数压低。
+    """
+    if not query or not result_title:
+        return 0.0
+    q, r = normalize_core(query), normalize_core(result_title)
+
+    def tokens(text):
+        return set(re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).split())
+
+    q_tokens, r_tokens = tokens(q), tokens(r)
+    if not q_tokens or not r_tokens:
+        return 0.0
+    overlap = len(q_tokens & r_tokens) / len(q_tokens)
+    if q and r and (q in r or r in q):
+        overlap = max(overlap, 0.9)
+    # 序号一致性：任一侧有序号且不一致时，说明是系列中的不同作品，大幅降分
+    # 序号一致性（系列作区分）：
+    # 1) 两侧都有序号且不一致 -> 不同作品，重降分（如 Sexy Beach 4 vs Sexy Beaches 2）；
+    # 2) query 有序号但结果无序号 -> 结果可能是同系列外传/无关作，降分（如 "SEX beach 4" vs "SEX ON THE BEACH"）；
+    # 3) 结果有序号但 query 无 -> 不降分（避免误伤，如中文 query 序号被别名吸收的情形）。
+    q_nums, r_nums = _series_numbers(query), _series_numbers(result_title)
+    if q_nums and r_nums and q_nums != r_nums:
+        overlap = min(overlap, 0.25)
+    elif q_nums and not r_nums:
+        overlap = min(overlap, 0.35)
+    return overlap
+
+
 def normalize_release_date(value):
     """把各数据源的 release_date（字符串/列表/date）统一为 date 对象或 None。
     Game.release_date 是 SQLite Date 类型，只接受 Python date 对象。
@@ -115,6 +453,28 @@ async def retag_games_from_glossary(db: AsyncSession) -> int:
 
     def lookup(text: str) -> str:
         return glossary.get((text, "tag")) or glossary.get((text, "")) or ""
+
+    # 通用(general)术语：原本按标签翻译、已持久化的字段，术语表新增 general 后需同步
+    # （如 "Shoujo" -> "少女"）；仅替换主字段，不误改别名等无关文本。
+    def _apply_general(value: str) -> str:
+        if not value:
+            return value
+        for (source_text, cat), target in glossary.items():
+            if cat == "general" and source_text and source_text != target:
+                value = value.replace(source_text, target)
+        return value
+
+    # 标题(title)类术语：整串命中优先，否则做词内子串替换
+    def _apply_title(value: str) -> str:
+        if not value:
+            return value
+        exact = glossary.get((value, "title"))
+        if exact:
+            return exact
+        for (source_text, cat), target in glossary.items():
+            if cat == "title" and source_text and target and source_text != target and source_text in value:
+                value = value.replace(source_text, target)
+        return value
 
     updated = 0
     games = list((await db.scalars(select(Game))).all())
@@ -157,8 +517,19 @@ async def retag_games_from_glossary(db: AsyncSession) -> int:
             # 数量对不上：只能对现有译文正向查表（覆盖术语表修正/中英互改）
             new_parts = [lookup(cur) or cur for cur in cur_parts]
         new_tags = ", ".join(new_parts)
-        if new_tags != current_tags:
+        changed = new_tags != current_tags
+        if changed:
             game.tags = new_tags
+        # title 类 + general 通用术语同步到标题
+        new_title = _apply_general(_apply_title(game.title or ""))
+        if new_title != (game.title or ""):
+            game.title = new_title
+            changed = True
+        new_desc = _apply_general(game.description or "")
+        if new_desc != (game.description or ""):
+            game.description = new_desc
+            changed = True
+        if changed:
             updated += 1
     if updated:
         await db.commit()
@@ -398,11 +769,103 @@ async def get_steam_detail(source_id: str) -> dict:
     return await SteamClient().get_game_detail(source_id)
 
 
+async def _resolve_primary_source(game) -> tuple[str, str]:
+    """为没有数据源 ID 的游戏（如手动入库的 custom）自动搜索一个主来源。
+    返回 (source_type, source_id)；全部失败时返回 ("", "")。
+    搜索顺序：Steam -> VNDB -> DLsite，均带相似度校验，避免误配。
+    """
+    title = (game.title or "").strip()
+    if not title:
+        return "", ""
+    probes = [title] + alias_candidates(title)
+
+    # 1) Steam
+    try:
+        steam_client = SteamClient()
+        results = []
+        for p in probes:
+            results = await steam_client.search_games(p, page_size=20)
+            if results:
+                break
+        if results:
+            def _srank(c):
+                t = c.get("title", "")
+                return max((title_similarity(g, t) for g in probes if g), default=0.0)
+            for cand in sorted(results, key=_srank, reverse=True)[:8]:
+                if _srank(cand) < 0.5:
+                    continue
+                try:
+                    if await steam_client.get_app_type(cand["source_id"]) == "game":
+                        logger.info("刷新自动匹配主来源=steam %s (%s)", cand.get("title"), cand["source_id"])
+                        return "steam", cand["source_id"]
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning("刷新自动匹配 steam 失败：%s", e)
+
+    # 2) VNDB
+    try:
+        pool = []
+        for p in probes:
+            try:
+                pool += await search_vndb(p)
+            except Exception:
+                pass
+        _seen, uniq = set(), []
+        for it in pool:
+            sid = it.get("source_id")
+            if sid and sid not in _seen:
+                _seen.add(sid)
+                uniq.append(it)
+        if uniq:
+            def _vrank(it):
+                t, a = it.get("title", ""), it.get("alias", "") or ""
+                return max((title_similarity(g, t) for g in probes if g), default=0.0) + \
+                       0.8 * max((title_similarity(g, a) for g in probes if g), default=0.0)
+            best = max(uniq, key=_vrank)
+            if _vrank(best) >= 0.5:
+                logger.info("刷新自动匹配主来源=vndb %s (%s)", best.get("title"), best["source_id"])
+                return "vndb", best["source_id"]
+    except Exception as e:
+        logger.warning("刷新自动匹配 vndb 失败：%s", e)
+
+    # 3) DLsite（日系 galgame 兜底）
+    try:
+        from .clients.dlsite_client import DlsiteClient
+        dlsite = DlsiteClient()
+        pool = []
+        for p in probes:
+            try:
+                pool += await dlsite.search_games(p, page_size=8)
+            except Exception:
+                pass
+        best, bs = None, 0.0
+        for c in pool:
+            sc = max((title_similarity(g, c.get("title", "")) for g in probes if g), default=0.0)
+            if sc > bs:
+                best, bs = c, sc
+        if best and bs >= 0.5:
+            logger.info("刷新自动匹配主来源=dlsite %s (%s)", best.get("title"), best["source_id"])
+            return "dlsite", best["source_id"]
+    except Exception as e:
+        logger.warning("刷新自动匹配 dlsite 失败：%s", e)
+
+    return "", ""
+
+
 async def refresh_game_metadata(game_id: int) -> None:
     async with SessionLocal() as session:
         game = await session.get(Game, game_id)
-        if not game or not game.source_id:
-            raise RuntimeError("游戏不存在或缺少数据源 ID")
+        if not game:
+            raise RuntimeError("游戏不存在")
+        # 手动入库/无数据源的游戏：自动搜索匹配出主来源后再刷新
+        if not game.source_id:
+            stype, sid = await _resolve_primary_source(game)
+            if not stype:
+                raise RuntimeError("未能在各数据源中找到匹配的游戏，请手动指定数据源或修改游戏名")
+            game.source_type = stype
+            game.source_id = sid
+            await session.commit()
         if game.source_type == "rawg":
             metadata = await RawgClient().get_game_detail(game.source_id)
         elif game.source_type == "steam":
@@ -470,18 +933,48 @@ async def refresh_game_metadata(game_id: int) -> None:
                 continue
             try:
                 if src == "steam":
-                    results = await search_steam(game.title)
-                    # storesearch 对 DLC 也返回 type=app，需 appdetails 校验 type=="game"
+                    results = []
+                    # 搜索顺序：先精确标题（含英文原名），再别名候选（按精确->宽泛）
+                    probes = []
+                    eng_name = (source_data.get("rawg") or {}).get("english_name", "")
+                    if eng_name:
+                        probes.append(eng_name)
+                    if game.title:
+                        probes.append(game.title)
+                    probes.extend(alias_candidates(game.title))
+                    seen_probe = set()
+                    for _probe in probes:
+                        if not _probe or _probe.lower() in seen_probe:
+                            continue
+                        seen_probe.add(_probe.lower())
+                        results = await search_steam(_probe)
+                        if results:
+                            break
+                    # 候选按与原始标题/英文名的相似度降序，避免顺位拿到 DLC/资料片
+                    rank_group = [eng_name, game.title] + alias_candidates(game.title)
+
+                    def _steam_rank(cand):
+                        t = cand.get("title", "")
+                        return max(
+                            title_similarity(game.title, t),
+                            title_similarity(eng_name, t) if eng_name else 0.0,
+                            max((title_similarity(g, t) for g in rank_group), default=0.0),
+                        )
+
+                    ordered = sorted(results, key=_steam_rank, reverse=True)
                     picked = None
-                    for candidate in results[:5]:
+                    # storesearch 对 DLC/原声集也返回 type=app，需 appdetails 校验 type=="game"
+                    for candidate in ordered[:8]:
                         try:
                             if await SteamClient().get_app_type(candidate["source_id"]) == "game":
                                 picked = candidate
                                 break
                         except Exception:
                             continue
-                    if picked is None and results:
-                        picked = results[0]
+                    if picked is None and ordered:
+                        # 相似度太低直接放弃，避免乱配（如 "sandbox" -> 无关游戏）
+                        if _steam_rank(ordered[0]) >= 0.4:
+                            picked = ordered[0]
                     if picked:
                         source_ids["steam"] = picked["source_id"]
                         source_data["steam"] = await get_steam_detail(picked["source_id"])
@@ -507,21 +1000,79 @@ async def refresh_game_metadata(game_id: int) -> None:
                                 logger.info("多来源刷新：game_id=%s, 通过 steam 英文名 '%s' 搜索到 rawg=%s", game.id, steam_eng, eng_results[0]["source_id"])
                         except Exception as e:
                             logger.warning("多来源刷新：game_id=%s, steam 英文名搜索 rawg 失败: %s", game.id, e)
-                    # 英文名没找到时，用中文名搜索作为 fallback
+                    # 中文别名映射的英文名候选（帝国时代 -> Age of Empires）
+                    if not results:
+                        for _alias in alias_candidates(game.title):
+                            results = _filter_main(await rawg_client.search_games(_alias, page_size=5))
+                            if results:
+                                logger.info("多来源刷新：game_id=%s, 别名 '%s' 搜索到 rawg=%s", game.id, _alias, results[0]["source_id"])
+                                break
+                    # 仍没找到时，用中文名搜索作为 fallback
                     if not results:
                         results = _filter_main(await rawg_client.search_games(game.title, page_size=5))
                     if results:
-                        source_ids["rawg"] = results[0]["source_id"]
-                        source_data["rawg"] = await rawg_client.get_game_detail(results[0]["source_id"])
+                        # 相似度排序：优先采纳标题最接近的，避免顺位误配其他作品
+                        rank_group = [steam_eng, game.title] + alias_candidates(game.title)
+                        def _rawg_rank(cand):
+                            t = cand.get("title", "")
+                            return max((title_similarity(g, t) for g in rank_group if g), default=0.0)
+                        best = max(results, key=_rawg_rank)
+                        if _rawg_rank(best) >= 0.4:
+                            source_ids["rawg"] = best["source_id"]
+                            source_data["rawg"] = await rawg_client.get_game_detail(best["source_id"])
                 elif src == "vndb":
-                    results = await search_vndb(game.title)
-                    if results:
-                        source_ids["vndb"] = results[0]["source_id"]
-                        source_data["vndb"] = await get_vndb_detail(results[0]["source_id"])
+                    # 搜索候选池：原名 + 别名候选，全部合并后统一打分
+                    vndb_pool = await search_vndb(game.title)
+                    for _alias in alias_candidates(game.title):
+                        try:
+                            vndb_pool = vndb_pool + await search_vndb(_alias)
+                        except Exception:
+                            pass
+                    # 去重
+                    _seen_v, vndb_pool = set(), []
+                    for item in vndb_pool:
+                        sid = item.get("source_id")
+                        if sid and sid not in _seen_v:
+                            _seen_v.add(sid)
+                            vndb_pool.append(item)
+                    if vndb_pool:
+                        rank_group = [game.title] + alias_candidates(game.title)
+                        def _vndb_rank(item):
+                            t = item.get("title", "")
+                            a = item.get("alias", "") or ""
+                            return max((title_similarity(g, t) for g in rank_group if g), default=0.0) * 1.0 + \
+                                   max((title_similarity(g, a) for g in rank_group if g), default=0.0) * 0.8
+                        best = max(vndb_pool, key=_vndb_rank)
+                        # 相似度校验：标题差太远则不采纳，避免乱配（如 "sandbox" -> 无关作品）
+                        if _vndb_rank(best) >= 0.5:
+                            source_ids["vndb"] = best["source_id"]
+                            source_data["vndb"] = await get_vndb_detail(best["source_id"])
                 elif src == "dlsite":
                     from .clients.dlsite_client import DlsiteClient
                     dlsite = DlsiteClient()
+                    # 1) RJ/VJ/BJ 编号精准查询（标题或路径里可直接提取）
                     workno = dlsite.extract_workno(game.title) or dlsite.extract_workno(game.resource_url or "")
+                    if not workno:
+                        # 2) 按标题/别名搜索 DLsite（日系 galgame 在 Steam/VNDB 常查不到）
+                        ds_query = []
+                        for q in [game.title] + alias_candidates(game.title):
+                            if q and q not in ds_query:
+                                ds_query.append(q)
+                        ds_best, ds_best_score = None, 0.0
+                        for q in ds_query[:3]:
+                            try:
+                                cands = await dlsite.search_games(q, page_size=8)
+                            except Exception:
+                                cands = []
+                            for c in cands:
+                                score = title_similarity(game.title, c.get("title", ""))
+                                if score > ds_best_score:
+                                    ds_best, ds_best_score = c, score
+                            if ds_best_score >= 0.6:
+                                break
+                        # 相似度达标才采纳，避免乱配
+                        if ds_best and ds_best_score >= 0.5:
+                            workno = ds_best["source_id"]
                     if workno:
                         source_ids["dlsite"] = workno
                         source_data["dlsite"] = await get_dlsite_detail(workno)

@@ -57,8 +57,16 @@ async def update_settings(payload: SettingsUpdate, db: AsyncSession = Depends(ge
 @router.post("/test-translator")
 async def test_translator(db: AsyncSession = Depends(get_db)):
     config = await _config(db)
-    translated = await get_translator(config.translator_type, secret_id=config.tencent_secret_id, secret_key=config.tencent_secret_key, region=config.tencent_region).translate("Hello")
-    if translated == "Hello" and config.translator_type != "none":
+    translator = get_translator(
+        config.translator_type,
+        secret_id=config.tencent_secret_id,
+        secret_key=config.tencent_secret_key,
+        region=config.tencent_region,
+    )
+    # 谷歌中文->中文会原样返回，用英文测试更可靠
+    probe = "hello" if config.translator_type != "tencent" else "Hello"
+    translated = await translator.translate(probe)
+    if translated == probe and config.translator_type != "none":
         raise HTTPException(502, "翻译服务连接失败")
     return {"ok": True, "result": translated}
 

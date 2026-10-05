@@ -77,8 +77,12 @@ class TranslationService:
             return text
         # 标签(category="tag")：优先用内置术语表，没有的保留原文（腾讯翻译君对galgame标签翻译质量差）
         if category == "tag":
-            # 先查数据库术语表（category=tag）
-            cached = self.glossary.get((text, "tag")) or self.glossary.get((text, ""))
+            # 先查数据库术语表：分类专用 > 通用(general) > 无分类
+            cached = (
+                self.glossary.get((text, "tag"))
+                or self.glossary.get((text, "general"))
+                or self.glossary.get((text, ""))
+            )
             if cached:
                 return cached
             # 含中文（含中英混合如"Steam 云"）且无日文假名的标签不再机翻：
@@ -90,13 +94,14 @@ class TranslationService:
             # 谷歌翻译兜底
             translated = await self._google_translate(text)
             if translated and translated != text and db is not None:
-                # 自动写入数据库术语表
+                # 自动学习写入「通用(general)」术语：同一词条可同时作用于标签、游戏名、简介，
+                # 用户可在术语表中把它改成具体分类（tag/title/description）以限制作用范围。
                 try:
                     from .models import TranslationGlossary
-                    db.add(TranslationGlossary(source_text=text, target_text=translated, category="tag"))
+                    db.add(TranslationGlossary(source_text=text, target_text=translated, category="general"))
                     await db.commit()
-                    self.glossary[(text, "tag")] = translated
-                    logger.info("标签谷歌翻译并加入术语表：%s -> %s", text, translated)
+                    self.glossary[(text, "general")] = translated
+                    logger.info("标签谷歌翻译并加入通用术语表：%s -> %s", text, translated)
                 except Exception as e:
                     logger.warning("标签术语写入失败：%s -> %s", text, e)
             return translated or text
@@ -107,10 +112,25 @@ class TranslationService:
             has_japanese_kana = any("\u3040" <= char <= "\u309f" or "\u30a0" <= char <= "\u30ff" for char in text)
             if not has_japanese_kana and chinese_count / len(text) > 0.3:
                 return text
-        translated = self.glossary.get((text, category or "")) or self.glossary.get((text, ""))
+        translated = (
+            self.glossary.get((text, category or ""))
+            or self.glossary.get((text, "general"))
+            or self.glossary.get((text, ""))
+        )
         if translated:
             logger.info("术语表命中：%s -> %s", text, translated)
             return translated
+        # 通用(general)术语的"词内替换"：整串未命中时，把 general 词条作为子串替换。
+        # 例如术语 Shoujo->少女 应作用于标题 "AI*Shoujo"；标签 Slam->大满贯 应作用于 "Slam Dunk"。
+        _partial = text
+        _hit = False
+        for (src_text, cat), tgt in self.glossary.items():
+            if cat == "general" and src_text and tgt and src_text != tgt and src_text in _partial:
+                _partial = _partial.replace(src_text, tgt)
+                _hit = True
+        if _hit and _partial != text:
+            logger.info("通用术语部分替换：%s -> %s", text, _partial)
+            return _partial
         try:
             result = await self.translator.translate(text)
             # 腾讯翻译君对日文乱码检测：回退谷歌翻译
@@ -183,7 +203,7 @@ class TranslationService:
         raw_title = metadata.get("title", "")
         if raw_title in title_fixes:
             metadata["title"] = title_fixes[raw_title]
-        translated = await self.translate_fields(metadata, {"title": "game_title", "description": "", "tags": "tag"})
+        translated = await self.translate_fields(metadata, {"title": "title", "description": "description", "tags": "tag"})
         return translated
 
     async def translate_rawg_metadata(self, db: AsyncSession, metadata: dict) -> dict:
@@ -213,15 +233,6 @@ class TranslationService:
         if q:
             query = query.where(TranslationGlossary.source_text.ilike(f"%{q}%"))
         return list((await db.scalars(query.order_by(TranslationGlossary.id).offset((page - 1) * size).limit(size))).all())
-
-    async def count_items(self, db: AsyncSession, category: str = "", q: str = "") -> int:
-        from sqlalchemy import func as _func
-        query = select(_func.count(TranslationGlossary.id))
-        if category:
-            query = query.where(TranslationGlossary.category == category)
-        if q:
-            query = query.where(TranslationGlossary.source_text.ilike(f"%{q}%"))
-        return (await db.scalar(query)) or 0
 
     async def count_items(self, db: AsyncSession, category: str = "", q: str = "") -> int:
         from sqlalchemy import func as _func

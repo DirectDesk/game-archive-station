@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from .clients.rawg_client import RawgClient
 from .clients.steam_client import SteamClient
-from .services import resolve_tags, normalize_release_date
+from .services import resolve_tags, normalize_release_date, alias_candidates, title_similarity, normalize_core
 
 def _is_non_main_title(title: str) -> bool:
     """简单内联过滤：标题包含非主游戏关键词返回True。"""
@@ -181,14 +181,8 @@ class LibraryScanner:
 
     @staticmethod
     def _title_match(search_name: str, result_title: str) -> bool:
-        """rawg 结果标题与搜索词的单词重叠率 >= 60% 才视为匹配，避免不相关结果挡住 vndb。"""
-        def words(text):
-            return set(re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).split())
-        sw = words(search_name)
-        rw = words(result_title)
-        if not sw:
-            return False
-        return len(sw & rw) / len(sw) >= 0.7
+        """rawg 结果标题与搜索词的相似度 >= 0.7 才视为匹配，避免不相关结果挡住 vndb。"""
+        return title_similarity(search_name, result_title) >= 0.7
 
     @staticmethod
     def _is_main_game_title(title: str) -> bool:
@@ -332,6 +326,18 @@ class LibraryScanner:
                         if self._title_match(raw_name, item.get("title", "")):
                             candidates = [item]
                             break
+                # 中文别名映射的英文名候选（帝国时代 -> Age of Empires）
+                if not candidates:
+                    for _alias in alias_candidates(raw_name):
+                        for item in await client.search_games(_alias, page_size=5):
+                            if _is_non_main_title(item.get("title", "")):
+                                continue
+                            if self._title_match(_alias, item.get("title", "")) or title_similarity(_alias, item.get("title", "")) >= 0.5:
+                                candidates = [item]
+                                break
+                        if candidates:
+                            logger.info("RAWG 别名匹配成功：%s -> %s (alias=%s)", raw_name, candidates[0].get("title", ""), _alias)
+                            break
             except _SkipSearch:
                 pass
             except Exception:
@@ -349,6 +355,11 @@ class LibraryScanner:
                         steam_results = await steam_client.search_games(search_name, page_size=5)
                     if not steam_results:
                         steam_results = await steam_client.search_games(raw_name, page_size=5)
+                    if not steam_results:
+                        for _alias in alias_candidates(raw_name):
+                            steam_results = await steam_client.search_games(_alias, page_size=5)
+                            if steam_results:
+                                break
                     # 过滤掉原声集/DLC等非主游戏结果
                     steam_results = [
                         r for r in steam_results
@@ -359,39 +370,71 @@ class LibraryScanner:
                     logger.exception("Steam fallback 搜索失败：%s", folder_path)
                     steam_results = []
                 if steam_results:
-                    # storesearch 对 DLC 也返回 type=app，必须用 appdetails 校验 type=="game"
+                    # 先按标题相似度降序，再校验 type（storesearch 对 DLC 也返回 type=app），
+                    # 避免顺位拿到资料片/原声集。
+                    _steam_group = [folder.parent.name if folder.parent else "", search_name, raw_name] + alias_candidates(raw_name)
+                    def _scan_steam_rank(cand):
+                        t = cand.get("title", "")
+                        return max((title_similarity(g, t) for g in _steam_group if g), default=0.0)
+                    steam_results = sorted(steam_results, key=_scan_steam_rank, reverse=True)
                     picked = None
-                    for candidate in steam_results[:5]:
+                    for candidate in steam_results[:8]:
                         try:
                             if await steam_client.get_app_type(candidate["source_id"]) == "game":
                                 picked = candidate
                                 break
                         except Exception:
                             continue
+                    if picked is None and steam_results and _scan_steam_rank(steam_results[0]) >= 0.5:
+                        picked = steam_results[0]
                     if picked:
                         candidates = [picked]
                         source_type = "steam"
                         logger.info("Steam fallback 匹配成功：%s -> %s (appid=%s)", raw_name, picked.get("title",""), picked.get("source_id",""))
                     else:
-                        logger.info("Steam fallback 候选均为 DLC 或校验失败，跳过：%s", raw_name)
+                        logger.info("Steam fallback 候选均为 DLC 或相似度过低，跳过：%s", raw_name)
             if not candidates:
                 try:
                     from .services import search_vndb
 
                     search_name = self._clean_folder_name_for_search(folder.name)
-                    vndb_results = await search_vndb(search_name)
-                    if not vndb_results:
-                        # 清洗后仍搜不到，用原始名再试一次
-                        vndb_results = await search_vndb(raw_name)
+                    # 候选池：清洗名 + 原始名 + 别名候选，合并统一打分（避免只试首个来源漏配）
+                    vndb_results = []
+                    for _q in [search_name, raw_name] + alias_candidates(raw_name):
+                        if not _q:
+                            continue
+                        try:
+                            vndb_results = vndb_results + await search_vndb(_q)
+                        except Exception:
+                            pass
+                    _seen_v, _uniq = set(), []
+                    for _it in vndb_results:
+                        _sid = _it.get("source_id")
+                        if _sid and _sid not in _seen_v:
+                            _seen_v.add(_sid)
+                            _uniq.append(_it)
+                    vndb_results = _uniq
                 except Exception:
                     logger.exception("VNDB fallback 搜索失败：%s", folder_path)
                     vndb_results = []
                 if vndb_results:
-                    # vndb 标题多为日文/罗马音，与英文搜索词单词重叠率低，不做相似度校验；
-                    # vndb 搜索 API 本身按相关性排序，第一个结果通常即目标游戏。
-                    candidates = [vndb_results[0]]
-                    source_type = "vndb"
-                    logger.info("VNDB fallback 匹配成功：%s -> %s (%s)", folder.name, vndb_results[0].get("title",""), vndb_results[0].get("source_id",""))
+                    # 相似度校验：vndb 搜索可能因一个宽泛词（如 "sandbox"）返回大量无关作品，
+                    # 直接取首个结果会造成乱配；取相似度最高者且需达阈值。
+                    def _vndb_score(item):
+                        return max(
+                            title_similarity(raw_name, item.get("title", "")),
+                            title_similarity(raw_name, item.get("alias", "") or ""),
+                            title_similarity(search_name, item.get("title", "")),
+                            title_similarity(search_name, item.get("alias", "") or ""),
+                        )
+
+                    best = max(vndb_results, key=_vndb_score)
+                    if _vndb_score(best) >= 0.5:
+                        candidates = [best]
+                        source_type = "vndb"
+                        logger.info("VNDB fallback 匹配成功：%s -> %s (%s)", raw_name, best.get("title",""), best.get("source_id",""))
+                    else:
+                        logger.info("VNDB 候选相似度过低，跳过（避免乱配）：%s 最高=%.2f %s", raw_name, _vndb_score(best), best.get("title",""))
             if not candidates:
                 # DLsite fallback：同人游戏（RJ/VJ/BJ编号）优先用编号精准查询
                 try:
@@ -411,15 +454,34 @@ class LibraryScanner:
                                 "cover_url": dlsite._full_url((work_detail.get("image_main") or {}).get("url", "")),
                             }]
                     else:
-                        # 无编号：关键词搜索
-                        dlsite_results = await dlsite.search_games(search_name, page_size=5)
-                        if not dlsite_results:
-                            dlsite_results = await dlsite.search_games(raw_name, page_size=5)
+                        # 无编号：关键词搜索（原名 + 别名候选），合并后按相似度挑选
+                        _ds_pool = []
+                        for _q in [search_name, raw_name] + alias_candidates(raw_name):
+                            if not _q:
+                                continue
+                            try:
+                                _ds_pool = _ds_pool + await dlsite.search_games(_q, page_size=8)
+                            except Exception:
+                                pass
+                        # 无编号搜索结果需相似度校验，避免乱配（如 "SEX beach 4"）
+                        _ds_best, _ds_best_score = None, 0.0
+                        for _c in _ds_pool:
+                            _score = max(
+                                title_similarity(raw_name, _c.get("title", "")),
+                                title_similarity(search_name, _c.get("title", "")),
+                                max((title_similarity(g, _c.get("title", "")) for g in alias_candidates(raw_name)), default=0.0),
+                            )
+                            if _score > _ds_best_score:
+                                _ds_best, _ds_best_score = _c, _score
+                        if _ds_best and _ds_best_score >= 0.5:
+                            dlsite_results = [_ds_best]
+                        else:
+                            dlsite_results = []
                 except Exception:
                     logger.exception("DLsite fallback 搜索失败：%s", folder_path)
                     dlsite_results = []
                 if dlsite_results:
-                    # DLsite 编号查询是精准匹配；搜索结果按相关性排序，取第一个
+                    # 有编号为精准匹配；搜索匹配已在上方做相似度校验
                     candidates = [dlsite_results[0]]
                     source_type = "dlsite"
                     logger.info("DLsite fallback 匹配成功：%s -> %s (%s)", folder.name, dlsite_results[0].get("title",""), dlsite_results[0].get("source_id",""))

@@ -5,8 +5,16 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8000"
-    dns: [192.168.20.1, 223.5.5.5]
-    extra_hosts: ["api.rawg.io:104.16.249.144"]
+    # 显式使用纯 IPv4 公共 DNS：宿主机 systemd-resolved 的 IPv6 nameserver 无路由会超时，
+    # 导致容器内域名解析间歇性失败（[Errno -3] Try again）。公共 DNS 经 dig 验证可用。
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+      - 114.114.114.114
+    dns_opt:
+      - timeout:1
+      - attempts:3
+      - single-request-reopen
     environment:
       - TZ=Asia/Shanghai
       - SCAN_ENABLE=true
@@ -23,3 +31,6 @@ services:
       - /vol1/1000/docker/game-archive/games:/vol/games
       # 云盘游戏转存到 NAS 本地的目标目录。
       - /vol1/1000/docker/game-archive/downloads:/vol/download
+      # 前端构建产物直接挂载：改前端只需重新构建 dist 并上传，无需重建镜像
+      # （镜像内 COPY 的 dist 会被此挂载覆盖，避免 Docker 层缓存导致前端不更新）。
+      - /vol1/1000/docker/game-archive/frontend/dist:/app/frontend/dist:ro

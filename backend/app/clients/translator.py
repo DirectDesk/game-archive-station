@@ -16,5 +16,11 @@ TRANSLATORS = {"tencent": TencentTranslator, "google": GoogleTranslator, "none":
 
 
 def get_translator(translator_type: str, **kwargs) -> TranslatorBase:
+    """按类型构造翻译器。
+    腾讯翻译君需要 secret_id/secret_key/region 等参数；谷歌/空翻译器无参构造。
+    """
     translator = TRANSLATORS.get(translator_type, NullTranslator)
-    return translator(**kwargs) if translator in (TencentTranslator, GoogleTranslator) else translator()
+    if translator is TencentTranslator:
+        filtered = {k: v for k, v in kwargs.items() if k in ("secret_id", "secret_key", "region")}
+        return translator(**filtered)
+    return translator()
