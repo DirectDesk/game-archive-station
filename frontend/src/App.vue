@@ -28,7 +28,9 @@ const displayTags = computed(() => {
   }
   return originalMetadata.value.tags || form.tags
 })
-const directoryPath = value => { const path=(value || '').replace(/\\/g,'/'); if (!path || /^https?:\/\//.test(path)) return path; const directory=/\/[^/]+\.[^/]+$/.test(path) ? path.slice(0,path.lastIndexOf('/')+1) : path; return directory.endsWith('/') ? directory : `${directory}/` }
+// 资源路径归一：目录补尾斜杠；文件路径原样保留（孤立文件游戏必须显示到文件名，
+// 否则同一根目录下多个压缩包会全部显示成同一个根路径，无法区分也无法定位源文件）
+const normalizeResourceUrl = value => { const path=(value || '').replace(/\\/g,'/'); if (!path || /^https?:\/\//.test(path)) return path; if (/\/[^/]+\.[^/]+$/.test(path)) return path; return path.endsWith('/') ? path : `${path}/` }
     const PATH_MAPPINGS = [
         { container: '/vol/baidu/', nas: '/vol02/1000-1-dd21201d/game_station/' },
         { container: '/app/data/', nas: '/vol1/1000/docker/game-archive/data/' },
@@ -116,7 +118,7 @@ async function applyMatch(candidate) {
     await load()
     const fresh = (await api('/api/games/' + active.value.id))
     active.value = fresh
-    Object.assign(form, { ...fresh, resource_url:directoryPath(fresh.resource_url) })
+    Object.assign(form, { ...fresh, resource_url:normalizeResourceUrl(fresh.resource_url) })
   } catch(e) { error.value = e.message }
   finally { matchApplying.value = null }
 }
@@ -128,7 +130,7 @@ async function retranslate(game) {
   retranslating[game.id] = true
   try {
     const result = await api(`/api/games/${game.id}/retranslate`, { method:'POST', body:JSON.stringify({}) })
-    if (active.value && active.value.id === game.id) { active.value = result; Object.assign(form, { ...result, resource_url:directoryPath(result.resource_url) }) }
+    if (active.value && active.value.id === game.id) { active.value = result; Object.assign(form, { ...result, resource_url:normalizeResourceUrl(result.resource_url) }) }
     await load()
   } catch(e) { error.value = e.message }
   finally { retranslating[game.id] = false }
@@ -146,8 +148,8 @@ async function testTranslator() {
 }
 
 function openNew() { Object.assign(form, blank()); coverSource.value='auto'; active.value=null; searchResults.value=[]; showForm.value=true }
-async function openGame(game) { active.value=game; coverSource.value=game.cover_source || 'auto'; Object.assign(form, {...game, resource_url:directoryPath(game.resource_url)}); transferTask.value=null; showForm.value=true; const saved=JSON.parse(localStorage.getItem('game-archive-transfer-task') || 'null'); if (saved && saved.game_id === game.id) { transferTask.value=saved; await pollTransfer() } try { const hasLocal = screenshots.value.some(u => u.startsWith('/data/')); if (!hasLocal) { Object.assign(form,await api(`/api/games/${game.id}/screenshots/fetch`)); await load() } } catch(e) { error.value=e.message } }
-async function save() { try { const url=active.value?`/api/games/${active.value.id}`:'/api/games'; form.resource_url=directoryPath(form.resource_url); await api(url,{method:active.value?'PUT':'POST',body:JSON.stringify(form)}); showForm.value=false; await load() } catch(e) { error.value=e.message } }
+async function openGame(game) { active.value=game; coverSource.value=game.cover_source || 'auto'; Object.assign(form, {...game, resource_url:normalizeResourceUrl(game.resource_url)}); transferTask.value=null; showForm.value=true; const saved=JSON.parse(localStorage.getItem('game-archive-transfer-task') || 'null'); if (saved && saved.game_id === game.id) { transferTask.value=saved; await pollTransfer() } try { const hasLocal = screenshots.value.some(u => u.startsWith('/data/')); if (!hasLocal) { Object.assign(form,await api(`/api/games/${game.id}/screenshots/fetch`)); await load() } } catch(e) { error.value=e.message } }
+async function save() { try { const url=active.value?`/api/games/${active.value.id}`:'/api/games'; form.resource_url=normalizeResourceUrl(form.resource_url); await api(url,{method:active.value?'PUT':'POST',body:JSON.stringify(form)}); showForm.value=false; await load() } catch(e) { error.value=e.message } }
 async function doRemove(deleteFiles) {
   if (!active.value) return
   try {

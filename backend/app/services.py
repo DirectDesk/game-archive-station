@@ -52,6 +52,59 @@ _MATCH_THRESHOLD = {
 }
 
 
+# 资源路径探测缓存：避免批量重算时反复 stat WebDAV 挂载点
+_APK_PROBE_CACHE: dict[str, bool] = {}
+_APK_PROBE_MAX_DEPTH = 2
+_APK_PROBE_MAX_ENTRIES = 400
+
+
+def path_has_apk(resource_url: str | None) -> bool:
+    """探测资源路径是否含 .apk 文件（判断安卓游戏）。
+
+    - 路径本身是 .apk 文件 -> True
+    - 路径是目录：浅层（<=2 层，最多 400 个条目）查找 .apk
+    - 探测结果按路径缓存；异常一律返回 False（不影响主流程）
+    """
+    if not resource_url:
+        return False
+    key = resource_url.rstrip("/")
+    if key in _APK_PROBE_CACHE:
+        return _APK_PROBE_CACHE[key]
+    result = False
+    try:
+        import os as _os
+        from pathlib import Path as _P
+
+        p = _P(key)
+        if p.is_file():
+            result = p.suffix.lower() == ".apk"
+        elif p.is_dir():
+            entries = 0
+            base_depth = len(p.parts)
+            for root, dirs, files in _os.walk(key):
+                # 深度控制：只探浅层，避免大目录全量遍历拖慢 WebDAV
+                if len(_P(root).parts) - base_depth >= _APK_PROBE_MAX_DEPTH:
+                    dirs[:] = []
+                for fn in files:
+                    entries += 1
+                    if entries > _APK_PROBE_MAX_ENTRIES:
+                        dirs[:] = []
+                        break
+                    if fn.lower().endswith(".apk"):
+                        result = True
+                        break
+                if result or entries > _APK_PROBE_MAX_ENTRIES:
+                    break
+    except Exception:
+        result = False
+    _APK_PROBE_CACHE[key] = result
+    return result
+
+
+def clear_apk_probe_cache() -> None:
+    _APK_PROBE_CACHE.clear()
+
+
 def infer_game_type(game: "Game", source_data: dict | None = None) -> list[str]:
     """按数据源与标签推断游戏平台类型，返回 ['pc','android','gal'] 的子集（有序）。
 
@@ -82,10 +135,16 @@ def infer_game_type(game: "Game", source_data: dict | None = None) -> list[str]:
     elif any(kw in tag_blob for kw in _GAL_TAG_KEYWORDS):
         types.append("gal")
 
-    if sources & {"steam", "rawg"}:
+    # 磁盘证据优先：资源路径实际含 .apk（探到浅层文件）是比"来源站"更强的信号。
+    # 安卓移植版同样会在 Steam/RAWG 建页，仅凭来源加 pc 会把安卓游戏误标成 pc。
+    _path_android = path_has_apk(getattr(game, "resource_url", None))
+
+    if sources & {"steam", "rawg"} and not _path_android:
         types.append("pc")
 
-    if any(kw in tag_blob for kw in ("android", "安卓", "手机版", "手游", "apk", "移植")):
+    # 标签关键词命中，或资源路径实际含 .apk 文件 -> android
+    _tag_android = any(kw in tag_blob for kw in ("android", "安卓", "手机版", "手游", "apk", "移植"))
+    if _tag_android or _path_android:
         types.append("android")
 
     if not types:
