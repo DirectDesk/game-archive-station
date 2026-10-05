@@ -38,6 +38,8 @@ class Game(Base):
     resource_url: Mapped[str] = mapped_column(String(2000), default="")
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     play_status: Mapped[str] = mapped_column(String(20), default="favorite")
+    # 游戏平台类型，多选，逗号分隔（pc/android/gal），与数据来源 source_type 解耦
+    game_type: Mapped[str] = mapped_column(String(50), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 class SystemConfig(Base):

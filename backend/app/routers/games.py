@@ -12,8 +12,8 @@ from ..clients.rawg_client import RawgClient
 from ..cover_service import cache_cover
 from ..database import get_db
 from ..models import Game, SystemConfig
-from ..schemas import GameCreate, GameOut, GameUpdate, RefreshMetadataTaskOut
-from ..services import fetch_game_screenshots, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata, search_steam, resolve_tags, get_steam_detail, get_vndb_detail, get_dlsite_detail, normalize_release_date
+from ..schemas import GameCreate, GameOut, GameUpdate, MatchApplyPayload, RefreshMetadataTaskOut, RetranslatePayload
+from ..services import apply_match, fetch_game_screenshots, find_match_candidates, refresh_game_metadata, refresh_rawg_game_metadata, refresh_vndb_game_metadata, retranslate_game, search_steam, resolve_tags, get_steam_detail, get_vndb_detail, get_dlsite_detail, normalize_release_date
 from ..task_manager import task_manager
 
 router = APIRouter(prefix="/api/games", tags=["games"])
@@ -451,6 +451,49 @@ async def delete_screenshot(game_id: int, index: int, db: AsyncSession = Depends
     await db.commit()
     await db.refresh(game)
     return game
+
+
+@router.get("/{game_id}/match-candidates")
+async def match_candidates(game_id: int, db: AsyncSession = Depends(get_db)):
+    """手动匹配：返回各数据源的候选元数据（含相似度），供用户挑选。"""
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "游戏不存在")
+    try:
+        return await find_match_candidates(game_id)
+    except Exception as exc:
+        raise HTTPException(502, f"候选搜索失败：{exc}") from exc
+
+
+@router.post("/{game_id}/apply-match", response_model=GameOut)
+async def apply_match_route(game_id: int, payload: MatchApplyPayload, db: AsyncSession = Depends(get_db)):
+    """应用手动匹配结果：把选定来源的元数据写入当前游戏。"""
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "游戏不存在")
+    try:
+        await apply_match(game_id, payload.source_type, payload.source_id, payload.set_primary)
+    except Exception as exc:
+        raise HTTPException(502, f"应用匹配失败：{exc}") from exc
+    db.expire_all()
+    fresh = await db.get(Game, game_id)
+    return fresh
+
+
+@router.post("/{game_id}/retranslate", response_model=GameOut)
+async def retranslate_route(game_id: int, payload: RetranslatePayload | None = None, db: AsyncSession = Depends(get_db)):
+    """重新翻译：用库内原文快照重走术语表/翻译 API，不联网刮削（改术语表后秒级生效）。"""
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "游戏不存在")
+    force = bool(payload.force) if payload else False
+    try:
+        await retranslate_game(game_id, force=force)
+    except Exception as exc:
+        raise HTTPException(502, f"重新翻译失败：{exc}") from exc
+    db.expire_all()
+    fresh = await db.get(Game, game_id)
+    return fresh
 
 
 @router.post("/{game_id}/refresh-metadata", response_model=RefreshMetadataTaskOut, status_code=202)

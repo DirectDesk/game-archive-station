@@ -30,6 +30,7 @@ class GameBase(BaseModel):
     resource_type: Literal["nas_cloud", "nas_local", "web_link", "none"] = "none"
     resource_url: str = ""
     play_status: Literal["favorite", "playing", "completed"] = "favorite"
+    game_type: str = Field(default="", max_length=50)
 
 
 class GameCreate(GameBase):
@@ -131,3 +132,38 @@ class SettingsUpdate(BaseModel):
     screenshot_source_priority: str | None = None
     scan_fetch_screenshots: bool | None = None
     max_screenshots: int | None = None
+
+
+class MatchCandidate(BaseModel):
+    """手动匹配候选项：某来源下的一条候选元数据。"""
+
+    source_type: str
+    source_id: str
+    title: str
+    alias: str = ""
+    release_date: date | None = None
+    developer: str = ""
+    cover_url: str = ""
+    similarity: float = 0.0
+    already_linked: bool = False
+
+
+class MatchApplyPayload(BaseModel):
+    source_type: Literal["rawg", "steam", "vndb", "dlsite"]
+    source_id: str = Field(min_length=1, max_length=100)
+    # 是否把该来源设为主来源（默认设为该来源）
+    set_primary: bool = True
+
+
+class RetranslatePayload(BaseModel):
+    # 留空表示按当前 auto_translate/translator_type 配置执行
+    force: bool = False
+
+
+class TranslatorTestPayload(BaseModel):
+    """保存前测试翻译连接，可传临时配置。"""
+
+    translator_type: Literal["none", "tencent", "google"] | None = None
+    tencent_secret_id: str | None = None
+    tencent_secret_key: str | None = None
+    tencent_region: str | None = None

@@ -21,6 +21,69 @@ logger = logging.getLogger(__name__)
 
 
 
+# ==================== 游戏平台类型推断 ====================
+# 与「数据来源 source_type」彻底解耦：source_type 表示元数据从哪个站抓的，
+# game_type 表示这个游戏实际跑在什么平台，多选（pc/android/gal）。
+
+_GAL_TAG_KEYWORDS = (
+    "visual novel", "视觉小说", "アドベンチャー", "adventure game",
+    "galgame", "ギャルゲー", "エロゲ", "eroge", "美少女", "恋爱", "恋愛",
+    "adv", "ノベル", "novel", "bishoujo", "dating sim", "乙女", "otome",
+)
+_GAL_SOURCES = {"vndb", "dlsite"}
+
+
+def infer_game_type(game: "Game", source_data: dict | None = None) -> list[str]:
+    """按数据源与标签推断游戏平台类型，返回 ['pc','android','gal'] 的子集（有序）。
+
+    规则（与产品确认）：
+      - 匹配到 vndb / dlsite 来源，或标签含 gal 关键词 -> gal
+      - 匹配到 steam / rawg 来源 -> pc
+      - 标签含 android/安卓/手机/移植 关键词 -> android
+    未命中任何来源时默认 pc（PC 是绝大多数情况）。
+    """
+    types: list[str] = []
+    try:
+        source_ids = json.loads(game.source_ids or "{}")
+    except Exception:
+        source_ids = {}
+    sources = {k for k, v in source_ids.items() if v}
+    if not sources and game.source_type and game.source_type != "custom":
+        sources.add(game.source_type)
+
+    # 聚合所有来源的标签（原文 + 译文都看，提高命中率）
+    tag_blob = (game.tags or "").lower()
+    if isinstance(source_data, dict):
+        for v in source_data.values():
+            if isinstance(v, dict) and v.get("tags"):
+                tag_blob += " " + str(v["tags"]).lower()
+
+    if sources & _GAL_SOURCES:
+        types.append("gal")
+    elif any(kw in tag_blob for kw in _GAL_TAG_KEYWORDS):
+        types.append("gal")
+
+    if sources & {"steam", "rawg"}:
+        types.append("pc")
+
+    if any(kw in tag_blob for kw in ("android", "安卓", "手机版", "手游", "apk", "移植")):
+        types.append("android")
+
+    if not types:
+        types.append("pc")
+    # 去重保序
+    seen, out = set(), []
+    for t in types:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def game_type_str(game: "Game", source_data: dict | None = None) -> str:
+    return ",".join(infer_game_type(game, source_data))
+
+
 async def resolve_tags(game: Game, config: SystemConfig, requested_source: str = "", db: AsyncSession = None) -> str:
     """按配置优先级从 original_data 中选择标签；返回选中的标签字符串。"""
     try:
@@ -1082,7 +1145,255 @@ async def refresh_game_metadata(game_id: int) -> None:
                 logger.warning("多来源刷新：game_id=%s, 补充来源 %s 失败: %s", game.id, src, e)
         game.source_ids = json.dumps(source_ids, ensure_ascii=False, default=str)
         game.source_data = json.dumps(source_data, ensure_ascii=False, default=str)
+        # 刷新元数据后重算游戏类型（来源可能变化）
+        game.game_type = game_type_str(game, source_data)
         await session.commit()
+
+
+# ==================== 手动匹配 / 重新翻译 ====================
+
+
+async def find_match_candidates(game_id: int, limit_per_source: int = 5) -> list[dict]:
+    """为指定游戏在各数据源搜索候选，返回带相似度的候选列表（按相似度降序）。
+
+    类似飞牛影视的「手动匹配」：把多个来源的候选一起列出来，由用户选择。
+    """
+    async with SessionLocal() as session:
+        game = await session.get(Game, game_id)
+        if not game:
+            raise RuntimeError("游戏不存在")
+        try:
+            source_ids = json.loads(game.source_ids or "{}")
+        except Exception:
+            source_ids = {}
+        try:
+            source_data = json.loads(game.source_data or "{}")
+        except Exception:
+            source_data = {}
+
+        # 搜索用的探针：英文名（若有）优先，其次标题与别名候选
+        eng_name = ""
+        for v in source_data.values():
+            if isinstance(v, dict) and v.get("english_name"):
+                eng_name = v["english_name"]
+                break
+        probes: list[str] = []
+        for c in ([eng_name] if eng_name else []) + [game.title] + alias_candidates(game.title):
+            if c and c.lower() not in {x.lower() for x in probes}:
+                probes.append(c)
+        probes = probes[:4]
+
+        rank_group = [g for g in ([eng_name, game.title] + alias_candidates(game.title)) if g]
+        candidates: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _add(source: str, item: dict):
+            sid = str(item.get("source_id") or "")
+            if not sid or (source, sid) in seen:
+                return
+            seen.add((source, sid))
+            t = item.get("title", "")
+            a = item.get("alias", "") or ""
+            sim = max((title_similarity(g, t) for g in rank_group), default=0.0)
+            if a:
+                sim = max(sim, max((title_similarity(g, a) for g in rank_group), default=0.0) * 0.9)
+            candidates.append({
+                "source_type": source,
+                "source_id": sid,
+                "title": t,
+                "alias": a,
+                "release_date": item.get("release_date"),
+                "developer": item.get("developer", ""),
+                "cover_url": item.get("cover_url", ""),
+                "similarity": round(float(sim), 3),
+                "already_linked": str(source_ids.get(source, "")) == sid,
+            })
+
+        for probe in probes:
+            # RAWG
+            try:
+                for item in (await RawgClient().search_games(probe, page_size=limit_per_source))[:limit_per_source]:
+                    _add("rawg", item)
+            except Exception as e:
+                logger.warning("手动匹配 rawg 搜索失败 %s: %s", probe, e)
+            # VNDB
+            try:
+                for item in (await search_vndb(probe))[:limit_per_source]:
+                    _add("vndb", item)
+            except Exception as e:
+                logger.warning("手动匹配 vndb 搜索失败 %s: %s", probe, e)
+            # Steam（storesearch 是摘要，跟一个 detail 补齐封面/日期）
+            try:
+                for item in (await search_steam(probe))[:limit_per_source]:
+                    _add("steam", item)
+            except Exception as e:
+                logger.warning("手动匹配 steam 搜索失败 %s: %s", probe, e)
+            # DLsite
+            try:
+                from .clients.dlsite_client import DlsiteClient
+                for item in (await DlsiteClient().search_games(probe, page_size=limit_per_source))[:limit_per_source]:
+                    _add("dlsite", item)
+            except Exception as e:
+                logger.warning("手动匹配 dlsite 搜索失败 %s: %s", probe, e)
+
+        # 按相似度降序；同分优先已关联来源
+        candidates.sort(key=lambda c: (c["similarity"], c["already_linked"]), reverse=True)
+        return candidates[:40]
+
+
+async def apply_match(game_id: int, source_type: str, source_id: str, set_primary: bool = True) -> dict:
+    """把用户手动选定的候选元数据应用到游戏。"""
+    async with SessionLocal() as session:
+        game = await session.get(Game, game_id)
+        if not game:
+            raise RuntimeError("游戏不存在")
+        if source_type == "rawg":
+            metadata = await RawgClient().get_game_detail(source_id)
+        elif source_type == "steam":
+            metadata = await get_steam_detail(source_id)
+        elif source_type == "vndb":
+            metadata = await get_vndb_detail(source_id)
+        elif source_type == "dlsite":
+            metadata = await get_dlsite_detail(source_id)
+        else:
+            raise RuntimeError(f"不支持的来源类型：{source_type}")
+
+        raw_metadata = dict(metadata)
+        _preserved = {k: metadata.get(k) for k in ("english_name",) if metadata.get(k)}
+        metadata = await translation_service.translate_metadata(session, metadata)
+        metadata.update(_preserved)
+        metadata["release_date"] = normalize_release_date(metadata.get("release_date"))
+
+        # 写入 source_ids / source_data（存翻译前原文）
+        try:
+            source_ids = json.loads(game.source_ids or "{}")
+        except Exception:
+            source_ids = {}
+        try:
+            source_data = json.loads(game.source_data or "{}")
+        except Exception:
+            source_data = {}
+        source_ids[source_type] = source_id
+        source_data[source_type] = {
+            k: v for k, v in raw_metadata.items()
+            if k not in ("resource_type", "resource_url", "play_status", "original_data")
+        }
+
+        if set_primary:
+            for field in ("title", "alias", "description", "developer", "publisher",
+                          "release_date", "rating", "tags", "series", "source_type",
+                          "source_id", "screenshots", "version", "original_data", "steam_appid"):
+                if field in metadata:
+                    setattr(game, field, metadata[field])
+            game.cover_url = metadata.get("cover_url", "")
+            game.cover_source = source_type
+            game.source_type = source_type
+            game.source_id = source_id
+            game.tag_source = source_type
+
+        game.source_ids = json.dumps(source_ids, ensure_ascii=False, default=str)
+        game.source_data = json.dumps(source_data, ensure_ascii=False, default=str)
+        # 应用匹配后重算游戏类型
+        game.game_type = game_type_str(game, source_data)
+        await session.commit()
+
+        if set_primary:
+            try:
+                game.cover_url = await cache_cover(game.id, metadata.get("cover_url", ""), source_type)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+        await session.refresh(game)
+        return {"id": game.id, "game_type": game.game_type, "title": game.title}
+
+
+async def retranslate_game(game_id: int, force: bool = False) -> dict:
+    """用库内 original_data（翻译前原文）重新走一遍翻译，不联网刮削，用于改术语表后快速生效。
+
+    force=True 时即使 auto_translate 关闭也强制翻译。
+    """
+    async with SessionLocal() as session:
+        game = await session.get(Game, game_id)
+        if not game:
+            raise RuntimeError("游戏不存在")
+        config = await session.get(SystemConfig, 1)
+        if not config:
+            config = SystemConfig(id=1)
+
+        # original_data 里存的是「主来源 + 各来源」的翻译前原文快照
+        try:
+            original = json.loads(game.original_data or "{}")
+        except Exception:
+            original = {}
+        try:
+            source_data = json.loads(game.source_data or "{}")
+        except Exception:
+            source_data = {}
+
+        await translation_service.load(session)
+
+        def _ensure_translatable():
+            # 没有 original_data 时，用 source_data 里主来源的原文兜底
+            nonlocal original
+            if not original and isinstance(source_data, dict):
+                primary = source_data.get(game.source_type)
+                if isinstance(primary, dict):
+                    original = dict(primary)
+
+        _ensure_translatable()
+
+        changed = False
+        # 重新翻译标题
+        src_title = original.get("title") or ""
+        if src_title:
+            new_title = await translation_service.translate(src_title, "title", session)
+            if new_title and new_title != game.title:
+                game.title = new_title
+                changed = True
+        # 重新翻译简介
+        src_desc = original.get("description") or ""
+        if src_desc:
+            new_desc = await translation_service.translate(src_desc, "description", session)
+            if new_desc and new_desc != game.description:
+                game.description = new_desc
+                changed = True
+        # 重新翻译标签（按当前标签来源的原文）
+        tag_src = game.tag_source or game.source_type
+        raw_tags = ""
+        if isinstance(source_data.get(tag_src), dict):
+            raw_tags = source_data[tag_src].get("tags", "")
+        if not raw_tags:
+            raw_tags = original.get("tags", "")
+        if raw_tags:
+            parts = [p.strip() for p in raw_tags.split(",") if p.strip()]
+            translated = []
+            for p in parts:
+                translated.append(await translation_service.translate(p, "tag", session))
+            new_tags = ", ".join(translated)
+            if new_tags != game.tags:
+                game.tags = new_tags
+                changed = True
+
+        game.game_type = game_type_str(game, source_data)
+        await session.commit()
+        return {"id": game.id, "changed": changed, "title": game.title}
+
+
+async def recompute_all_game_types() -> int:
+    """按推断规则重算所有游戏的 game_type（存量数据一次性回填）。"""
+    async with SessionLocal() as session:
+        count = 0
+        for game in (await session.scalars(select(Game))).all():
+            try:
+                sd = json.loads(game.source_data or "{}")
+            except Exception:
+                sd = {}
+            new_type = game_type_str(game, sd)
+            if new_type != game.game_type:
+                game.game_type = new_type
+                count += 1
+        await session.commit()
+        return count
 
 
 async def refresh_vndb_game_metadata(game_id: int) -> None:
