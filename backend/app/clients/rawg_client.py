@@ -37,26 +37,24 @@ class RawgClient:
                 for item in response.json().get("results", [])
             ]
 
-    async def get_game_by_steam_appid(self, steam_appid: str) -> dict | None:
-        """通过 Steam AppID 反查 RAWG 游戏"""
-        if not steam_appid:
-            return None
-        key = await self._api_key()
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(
-                f"{self.base_url}/games",
-                params={"key": key, "steam_appid": steam_appid, "page_size": 1},
-            )
-            response.raise_for_status()
-            results = response.json().get("results", [])
-            if results:
-                return {
-                    "source_type": "rawg",
-                    "source_id": str(results[0]["id"]),
-                    "title": results[0].get("name", ""),
-                    "cover_url": results[0].get("background_image", ""),
-                }
-            return None
+    # 【已删除】get_game_by_steam_appid(steam_appid)
+    #
+    # 原实现走 GET /games?steam_appid=<id>，但 RAWG 的 /games 端点**不支持**该过滤参数：
+    # 参数被静默忽略，接口只是返回游戏列表的默认第一条，与传入的 appid 无关。
+    # 实测对照（三个不同 appid 返回完全相同的结果）：
+    #     steam_appid=3101040    -> rawg_id=3498 'Grand Theft Auto V'
+    #     steam_appid=999999999  -> rawg_id=3498 'Grand Theft Auto V'  (编造)
+    #     steam_appid=1          -> rawg_id=3498 'Grand Theft Auto V'
+    # 参数有效性对照：
+    #     ?steam_appid=3101040   -> count=901101（等于全库总数，参数无效）
+    #     ?stores=1              -> count=123597（RAWG 支持 stores 过滤，参数有效）
+    #
+    # 因此该方法是个「静默返回错误数据」的坏接口，任何调用方都会把 GTA V 的元数据
+    # 写到目标游戏上。因无实际需求（steam 为主来源、rawg 仅作补充），直接移除而非修复。
+    # 若将来确需「Steam AppID -> RAWG」反查，正确思路是：
+    #   1) 用 stores=1 限定 Steam 商店，再用 search=<Steam 游戏名> 搜索；
+    #   2) 对候选逐个 get_game_detail()，取返回的 steam_appid 与目标 appid 相等者。
+    #   切勿依赖 /games?steam_appid= 这类不存在的过滤参数。
 
     async def get_game_detail(self, rawg_id: str) -> dict:
         key = await self._api_key()
