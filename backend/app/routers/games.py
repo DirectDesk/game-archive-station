@@ -20,13 +20,21 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 
 
 @router.get("", response_model=list[GameOut])
-async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_type: str = "", play_status: str = "", tag: str = "", sort: str = "updated"):
+async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_type: str = "", play_status: str = "", tag: str = "", game_type: str = "", sort: str = "updated"):
     query = select(Game)
     if q:
         term = f"%{q}%"
         query = query.where(or_(Game.title.ilike(term), Game.alias.ilike(term), Game.developer.ilike(term), Game.publisher.ilike(term), Game.series.ilike(term)))
     if source_type:
         query = query.where(Game.source_type == source_type)
+    # 游戏平台类型（pc/android/gal，可多选逗号分隔）。
+    # game_type 存的是逗号分隔串（如 "gal,pc"），用 LIKE 做包含匹配；
+    # 逗号包裹两端避免 "pc" 误命中 "pcx" 这类前缀。
+    gtypes = [v.strip() for v in game_type.split(",") if v.strip()]
+    if gtypes:
+        query = query.where(
+            or_(*(Game.game_type.ilike(f"%{value}%") for value in gtypes))
+        )
     if play_status:
         query = query.where(Game.play_status == play_status)
     tags = [value.strip() for value in tag.split(",") if value.strip()]

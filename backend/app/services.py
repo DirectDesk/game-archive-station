@@ -1,4 +1,6 @@
 from datetime import date
+import asyncio
+import difflib
 import hashlib
 import json
 import logging
@@ -31,6 +33,23 @@ _GAL_TAG_KEYWORDS = (
     "adv", "ノベル", "novel", "bishoujo", "dating sim", "乙女", "otome",
 )
 _GAL_SOURCES = {"vndb", "dlsite"}
+
+
+# ==================== 跨源匹配采纳门槛 ====================
+# 历史问题：AI Shoujo 被 VNDB 的 "Shoujo Settai"（相似度 0.5）抢占主来源，
+# 而 Steam/RAWG 明明有 100% 命中的记录。根因是阈值太低 + 来源优先级不合理。
+# 现在统一为：自动匹配必须达到 MATCH_ACCEPT（0.7）才采纳；
+# MATCH_STRONG（0.85）以上视为高置信命中，可跳过后续来源尝试。
+MATCH_ACCEPT = 0.70
+MATCH_STRONG = 0.85
+
+# 各来源的单条候选采纳门槛（DLsite 标题风格差异大，略放宽）
+_MATCH_THRESHOLD = {
+    "steam": MATCH_ACCEPT,
+    "rawg": MATCH_ACCEPT,
+    "vndb": MATCH_ACCEPT,
+    "dlsite": 0.62,
+}
 
 
 def infer_game_type(game: "Game", source_data: dict | None = None) -> list[str]:
@@ -230,6 +249,13 @@ _ALIAS_MAP = {
     "同校生": "Schoolmate",
     "真实女友": "Real Kanojo",
     "欲望格斗": "Battle Raper",
+    # 中文常见译名补充（用户库里实际出现的）
+    "命运/留夜": "Fate/stay night",
+    "命运留夜": "Fate/stay night",
+    "命运之夜": "Fate/stay night",
+    "暑假学校": "School in Summer Vacation",
+    "美少女万华镜": "Bishoujo Mangekyou",
+    "美少女万華鏡": "Bishoujo Mangekyou",
     "苍之彼方的四重奏": "Aokana",
     "千恋": "Senren Banka",
     "魔女的夜宴": "Sabbat of the Witch",
@@ -282,21 +308,50 @@ _ALIAS_MAP = {
 }
 
 
-def normalize_core(text: str) -> str:
-    """提取标题核心：去掉副标题分隔符后的部分、括号内容、年份、场景组后缀。"""
+def _to_halfwidth(text: str) -> str:
+    """全角字符转半角（ＡＢＣ１２３＊！ -> ABC123*!），并统一常见特殊符号。
+
+    这是跨源匹配的关键：AI＊少女 / ＡＩ少女 / AI*少女 应当归一为同一串。
+    """
     if not text:
         return ""
-    value = text
+    out = []
+    for ch in text:
+        code = ord(ch)
+        # 全角 ASCII 区（！ to ～）映射到半角
+        if 0xFF01 <= code <= 0xFF5E:
+            out.append(chr(code - 0xFEE0))
+        elif code == 0x3000:          # 全角空格
+            out.append(" ")
+        else:
+            out.append(ch)
+    value = "".join(out)
+    # 各类星号/中点/连接符统一
+    value = re.sub(r"[＊*✳✱✲✴☆★·・‧∙⋅]", "*", value)
+    # 波浪线统一
+    value = re.sub(r"[〜～〰︴]", "~", value)
+    # 弯引号统一
+    value = re.sub(r"[‘’“”]", "'", value)
+    return value
+
+
+def normalize_core(text: str) -> str:
+    """提取标题核心：全角转半角、去副标题、去括号内容、去年份、去版本号。"""
+    if not text:
+        return ""
+    value = _to_halfwidth(text)
     # 去掉方括号/圆括号内容（发布组、年份、汉化组等）
     value = re.sub(r"\[[^\]]*\]", " ", value)
     value = re.sub(r"[\(（][^\)）]*[\)）]", " ", value)
     # 去掉年份/编号样式（[111229]、20141230）
     value = re.sub(r"\b\d{6,8}\b", " ", value)
-    # 副标题分隔符统一（冒号/破折号/波浪号/中点）
-    value = re.split(r"[:：\-—–~～]|(?<=\w)\s+[·・]\s*(?=\w)", value, maxsplit=1)[0]
+    # 副标题分隔符统一（冒号/破折号/波浪号/中点）；注意 '*' 不再作为分隔符
+    value = re.split(r"[:：\-—–~]|(?<=\w)\s+[·・]\s*(?=\w)", value, maxsplit=1)[0]
     # 去版本号
     value = re.sub(r"(?i)\bv\d+(?:\.\d+){1,3}\b", " ", value)
     value = re.sub(r"[._]+", " ", value)
+    # '*' 视作分隔符（AI*Shoujo -> "ai shoujo"），保留两侧词
+    value = value.replace("*", " ")
     return re.sub(r"\s+", " ", value).strip().lower()
 
 
@@ -453,12 +508,65 @@ def _roman_to_int(token: str) -> int | None:
 
 
 def title_similarity(query: str, result_title: str) -> float:
-    """双向包含 + 词元重叠的相似度：query 是结果标题的一部分（或反之）时高分。
-    额外规则：若两侧的"作品序号"不同（如 4 vs 2、4 vs 无），判定为不同作品，分数压低。
+    """标题相似度（0~1），用于跨源匹配候选打分。
+
+    设计要点（修复历史误配）：
+      1. 双向包含：query 是结果标题一部分（或反之）时给高分，但**受长度比约束**，
+         避免 "AI Shoujo" 命中 "AI: Rampage" 这类只共享短前缀的情况。
+      2. 词元重叠：按 query 词元被覆盖的比例算，但对**词元数少的短标题**做惩罚，
+         因为短标题（1~2 个词）的覆盖率指标极不稳定。
+      3. 字符级相似：用 difflib 序列相似度兜底，衡量整串的接近程度。
+      4. 最终取「包含分 / 词元分」的较大者，再与字符分做加权融合，
+         并乘上长度比惩罚系数。
+      5. 序号一致性：系列作序号不同时大幅降分（Sexy Beach 4 vs Sexy Beaches 2）。
     """
     if not query or not result_title:
         return 0.0
+
+    # 结果标题可能是多别名写法（Steam 用 "/" 分隔，如 "AI*Shoujo/AI*少女"）。
+    # 对每个别名段分别打分，取最高值——这才是"该来源是否收录了这款游戏"的正确语义。
+    raw_r = _to_halfwidth(str(result_title))
+    segments = [s for s in re.split(r"[/|｜]", raw_r) if s.strip()] or [raw_r]
+    if len(segments) > 1:
+        best = 0.0
+        for seg in segments:
+            s = _title_similarity_single(query, seg)
+            if s > best:
+                best = s
+        # 若有任一段命中，直接采用该段分数（避免被其他无关别名稀释）
+        if best >= 0.5:
+            return round(min(1.0, best), 4)
+        # 全段都低：也保留一点点"多段中最佳"的信息
+        return round(best, 4)
+
+    return _title_similarity_single(query, result_title)
+
+
+def _cjk_char_overlap(a: str, b: str) -> float:
+    """CJK 字符集合的 Jaccard 相似度，用于中日文标题的部分命中兜底。
+
+    "ai 少女" vs "ai shoujo ai 少女" -> 共享 {ai, 少女} 中的 "少女"，
+    而 "ai少女" vs "ai shoujo ai 少女" -> 共享 "ai" 与 "少女" 两个 CJK/拉丁块。
+    """
+    def blocks(text):
+        # 把连续 CJK 视为一个块，连续拉丁数字视为一个块
+        return set(re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", text.lower()))
+
+    ba, bb = blocks(a), blocks(b)
+    if not ba or not bb:
+        return 0.0
+    inter = ba & bb
+    if not inter:
+        return 0.0
+    # 以较短一侧为基准：短串的块被长串覆盖的比例
+    return len(inter) / len(ba) if len(ba) <= len(bb) else len(inter) / len(bb)
+
+
+def _title_similarity_single(query: str, result_title: str) -> float:
+    """单段标题相似度（内部实现，不含多别名分段）。"""
     q, r = normalize_core(query), normalize_core(result_title)
+    if not q or not r:
+        return 0.0
 
     def tokens(text):
         return set(re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).split())
@@ -466,21 +574,86 @@ def title_similarity(query: str, result_title: str) -> float:
     q_tokens, r_tokens = tokens(q), tokens(r)
     if not q_tokens or not r_tokens:
         return 0.0
-    overlap = len(q_tokens & r_tokens) / len(q_tokens)
-    if q and r and (q in r or r in q):
-        overlap = max(overlap, 0.9)
-    # 序号一致性：任一侧有序号且不一致时，说明是系列中的不同作品，大幅降分
-    # 序号一致性（系列作区分）：
-    # 1) 两侧都有序号且不一致 -> 不同作品，重降分（如 Sexy Beach 4 vs Sexy Beaches 2）；
-    # 2) query 有序号但结果无序号 -> 结果可能是同系列外传/无关作，降分（如 "SEX beach 4" vs "SEX ON THE BEACH"）；
-    # 3) 结果有序号但 query 无 -> 不降分（避免误伤，如中文 query 序号被别名吸收的情形）。
+
+    # --- 词元覆盖率（对称，取较严格的一侧）---
+    cover_q = len(q_tokens & r_tokens) / len(q_tokens)
+    cover_r = len(q_tokens & r_tokens) / len(r_tokens)
+    token_score = min(cover_q, cover_r) if len(q_tokens) > 1 else cover_q
+
+    # --- 双向包含（带长度比约束）---
+    contain_score = 0.0
+    if q in r or r in q:
+        shorter, longer = (q, r) if len(q) <= len(r) else (r, q)
+        ratio = len(shorter) / max(len(longer), 1)
+        # 长度比太悬殊（如 "ai" 包含于超长标题）时，包含关系不具说服力
+        if ratio >= 0.6:
+            contain_score = 0.9
+        elif ratio >= 0.4:
+            contain_score = 0.7
+        else:
+            contain_score = 0.45
+
+    # --- 字符级相似（整串）---
+    char_score = difflib.SequenceMatcher(None, q, r).ratio()
+
+    base = max(contain_score, token_score)
+    # 融合字符级相似：整串接近时明显加分
+    score = max(base, base * 0.65 + char_score * 0.35)
+    if char_score >= 0.85:
+        score = max(score, char_score)
+
+    # --- 短标题惩罚：query 词元 <=2 且结果词元偏多时，覆盖率不可信 ---
+    if len(q_tokens) <= 2 and len(r_tokens) >= 3:
+        score *= 0.75
+    if len(q_tokens) == 1 and len(r_tokens) >= 2:
+        score *= 0.8
+
+    # --- CJK / 跨语言块重叠兜底 ---
+    # "ai少女" vs "ai shoujo ai 少女"：token 完全不相交，但字符块有共享
+    cjk = _cjk_char_overlap(q, r)
+    if cjk > 0:
+        # 至少两个块重合才算有说服力（单块重合容易误伤，如都含 "ai"）
+        shared = len(set(re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", q)) &
+                     set(re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", r)))
+        if shared >= 2:
+            score = max(score, 0.55 + 0.4 * cjk)
+        elif shared == 1 and len(q) >= 4:
+            score = max(score, 0.5 * cjk)
+
+    # --- 序号一致性 ---
+    # 数字相同的系列作（"尾行3" vs "Biko 3"）是**正面**信号，不应降分；
+    # 数字不同（"Sexy Beach 4" vs "Sexy Beaches 2"）则是不同作品，重罚。
     q_nums, r_nums = _series_numbers(query), _series_numbers(result_title)
     if q_nums and r_nums and q_nums != r_nums:
-        overlap = min(overlap, 0.25)
+        score = min(score, 0.25)
     elif q_nums and not r_nums:
-        overlap = min(overlap, 0.35)
-    return overlap
+        score = min(score, 0.35)
 
+    # --- 纯数字巧合惩罚 ---
+    # 只靠一个共同数字（"尾行3" vs "Doom 3"）不该得高分；
+    # 但跨语言别名映射（"尾行3" -> "Biko 3"）本来就没有共同词，
+    # 这种情况**由调用方的别名探针负责命中**，此处只做温和压制，
+    # 避免把 0.5 级的"同号不同作"抬到门槛之上。
+    def _strip_nums(text):
+        return re.sub(r"\b\d{1,2}\b", " ", text).strip()
+
+    q_text, r_text = _strip_nums(q), _strip_nums(r)
+    if q_text and r_text:
+        q_blocks = set(re.findall(r"[\u4e00-\u9fff]+|[a-z]+", q_text))
+        r_blocks = set(re.findall(r"[\u4e00-\u9fff]+|[a-z]+", r_text))
+        if q_blocks and r_blocks and not (q_blocks & r_blocks):
+            # 去掉数字后毫无共同词 —— 典型的"数字巧合"。
+            # 分两档：
+            #   * 只有一侧带数字（"Biko" vs "Arma 3"）：噪声可能性最高，压到 0.3；
+            #   * 两侧都带且相同数字（"尾行3" vs "Biko 3" 这类同号但不是同一作的）：
+            #     压到 0.5。注意真正的别名命中（探针 "Biko 3"）会走另一条路径得 1.0，
+            #     不受此处影响。
+            if not (q_nums and r_nums and q_nums == r_nums):
+                score = min(score, 0.3)
+            else:
+                score = min(score, 0.5)
+
+    return round(max(0.0, min(1.0, score)), 4)
 
 def normalize_release_date(value):
     """把各数据源的 release_date（字符串/列表/date）统一为 date 对象或 None。
@@ -834,87 +1007,165 @@ async def get_steam_detail(source_id: str) -> dict:
 
 async def _resolve_primary_source(game) -> tuple[str, str]:
     """为没有数据源 ID 的游戏（如手动入库的 custom）自动搜索一个主来源。
+
     返回 (source_type, source_id)；全部失败时返回 ("", "")。
-    搜索顺序：Steam -> VNDB -> DLsite，均带相似度校验，避免误配。
+
+    改进（修复历史误配）：
+      * 四个来源**并行**搜索，各自算出最佳候选及分数；
+      * 只有当最佳分数 >= 该来源门槛（默认 0.70）时才作为候选参与竞争；
+      * 在所有达标来源中，取**分数最高**者，而不是按固定顺序先撞先得。
+        这样 "AI Shoujo" 会选 Steam(1.0) 而不是 VNDB(0.516)。
+      * 高置信（>=0.85）时若多个来源都命中，仍优先 Steam/RAWG（PC 游戏收录更全），
+        但分数差距明显时以分数为准。
     """
     title = (game.title or "").strip()
     if not title:
         return "", ""
     probes = [title] + alias_candidates(title)
 
-    # 1) Steam
-    try:
-        steam_client = SteamClient()
-        results = []
-        for p in probes:
-            results = await steam_client.search_games(p, page_size=20)
-            if results:
-                break
-        if results:
-            def _srank(c):
-                t = c.get("title", "")
-                return max((title_similarity(g, t) for g in probes if g), default=0.0)
-            for cand in sorted(results, key=_srank, reverse=True)[:8]:
-                if _srank(cand) < 0.5:
+    async def _try_steam():
+        """返回 (score, source_id, human_title) 或 None。"""
+        try:
+            sc = SteamClient()
+            results = []
+            for p in probes:
+                results = await sc.search_games(p, page_size=20)
+                if results:
+                    break
+            if not results:
+                return None
+            probe_group = [g for g in probes if g]
+            ranked = sorted(
+                results,
+                key=lambda c: max((title_similarity(g, c.get("title", "")) for g in probe_group), default=0.0),
+                reverse=True,
+            )
+            for cand in ranked[:8]:
+                score = max((title_similarity(g, cand.get("title", "")) for g in probe_group), default=0.0)
+                if score < _MATCH_THRESHOLD["steam"]:
                     continue
                 try:
-                    if await steam_client.get_app_type(cand["source_id"]) == "game":
-                        logger.info("刷新自动匹配主来源=steam %s (%s)", cand.get("title"), cand["source_id"])
-                        return "steam", cand["source_id"]
+                    if await sc.get_app_type(cand["source_id"]) == "game":
+                        return (score, cand["source_id"], cand.get("title", ""))
                 except Exception:
                     continue
-    except Exception as e:
-        logger.warning("刷新自动匹配 steam 失败：%s", e)
+            return None
+        except Exception as e:
+            logger.warning("自动匹配 steam 失败：%s", e)
+            return None
 
-    # 2) VNDB
-    try:
-        pool = []
-        for p in probes:
-            try:
-                pool += await search_vndb(p)
-            except Exception:
-                pass
-        _seen, uniq = set(), []
-        for it in pool:
-            sid = it.get("source_id")
-            if sid and sid not in _seen:
-                _seen.add(sid)
-                uniq.append(it)
-        if uniq:
-            def _vrank(it):
+    async def _try_rawg():
+        try:
+            client = RawgClient()
+            probe_group = [g for g in probes if g]
+            for p in probes:
+                results = await client.search_games(p, page_size=8)
+                if not results:
+                    continue
+                best, bs = None, 0.0
+                for cand in results:
+                    s = max((title_similarity(g, cand.get("title", "")) for g in probe_group), default=0.0)
+                    if s > bs:
+                        best, bs = cand, s
+                if best and bs >= _MATCH_THRESHOLD["rawg"]:
+                    return (bs, best["source_id"], best.get("title", ""))
+            return None
+        except Exception as e:
+            logger.warning("自动匹配 rawg 失败：%s", e)
+            return None
+
+    async def _try_vndb():
+        try:
+            pool = []
+            for p in probes:
+                try:
+                    pool += await search_vndb(p)
+                except Exception:
+                    pass
+            seen, uniq = set(), []
+            for it in pool:
+                sid = it.get("source_id")
+                if sid and sid not in seen:
+                    seen.add(sid)
+                    uniq.append(it)
+            if not uniq:
+                return None
+            probe_group = [g for g in probes if g]
+
+            def _rank(it):
                 t, a = it.get("title", ""), it.get("alias", "") or ""
-                return max((title_similarity(g, t) for g in probes if g), default=0.0) + \
-                       0.8 * max((title_similarity(g, a) for g in probes if g), default=0.0)
-            best = max(uniq, key=_vrank)
-            if _vrank(best) >= 0.5:
-                logger.info("刷新自动匹配主来源=vndb %s (%s)", best.get("title"), best["source_id"])
-                return "vndb", best["source_id"]
-    except Exception as e:
-        logger.warning("刷新自动匹配 vndb 失败：%s", e)
+                st = max((title_similarity(g, t) for g in probe_group), default=0.0)
+                sa = max((title_similarity(g, a) for g in probe_group), default=0.0) if a else 0.0
+                # 别名权重降到 0.7：历史 0.8 会把弱命中抬进门槛
+                return max(st, sa * 0.7)
 
-    # 3) DLsite（日系 galgame 兜底）
-    try:
-        from .clients.dlsite_client import DlsiteClient
-        dlsite = DlsiteClient()
-        pool = []
-        for p in probes:
-            try:
-                pool += await dlsite.search_games(p, page_size=8)
-            except Exception:
-                pass
-        best, bs = None, 0.0
-        for c in pool:
-            sc = max((title_similarity(g, c.get("title", "")) for g in probes if g), default=0.0)
-            if sc > bs:
-                best, bs = c, sc
-        if best and bs >= 0.5:
-            logger.info("刷新自动匹配主来源=dlsite %s (%s)", best.get("title"), best["source_id"])
-            return "dlsite", best["source_id"]
-    except Exception as e:
-        logger.warning("刷新自动匹配 dlsite 失败：%s", e)
+            best = max(uniq, key=_rank)
+            bs = _rank(best)
+            if bs >= _MATCH_THRESHOLD["vndb"]:
+                return (bs, best["source_id"], best.get("title", ""))
+            return None
+        except Exception as e:
+            logger.warning("自动匹配 vndb 失败：%s", e)
+            return None
 
-    return "", ""
+    async def _try_dlsite():
+        try:
+            from .clients.dlsite_client import DlsiteClient
+            dlsite = DlsiteClient()
+            # RJ/VJ/BJ 编号精准命中，直接给满分
+            workno = dlsite.extract_workno(title) or dlsite.extract_workno(game.resource_url or "")
+            if workno:
+                return (1.0, workno, workno)
+            probe_group = [g for g in probes if g]
+            pool = []
+            for p in probes:
+                try:
+                    pool += await dlsite.search_games(p, page_size=8)
+                except Exception:
+                    pass
+            best, bs = None, 0.0
+            for c in pool:
+                s = max((title_similarity(g, c.get("title", "")) for g in probe_group), default=0.0)
+                if s > bs:
+                    best, bs = c, s
+            if best and bs >= _MATCH_THRESHOLD["dlsite"]:
+                return (bs, best["source_id"], best.get("title", ""))
+            return None
+        except Exception as e:
+            logger.warning("自动匹配 dlsite 失败：%s", e)
+            return None
 
+    # 四源并行，谁先命中都保留，最后统一比分数
+    results = await asyncio.gather(
+        _try_steam(), _try_rawg(), _try_vndb(), _try_dlsite(),
+        return_exceptions=True,
+    )
+    names = ["steam", "rawg", "vndb", "dlsite"]
+    hits: list[tuple[float, str, str, str]] = []
+    for name, res in zip(names, results):
+        if isinstance(res, Exception):
+            logger.warning("自动匹配 %s 异常：%s", name, res)
+            continue
+        if res:
+            score, sid, human = res
+            hits.append((score, name, str(sid), human or ""))
+
+    if not hits:
+        return "", ""
+
+    # 择优：分数优先；分数接近（差值 < 0.06）时 PC 向来源（steam/rawg）优先
+    hits.sort(key=lambda h: (-h[0], 0 if h[1] in ("steam", "rawg") else 1))
+    top = hits[0]
+    for h in hits[1:]:
+        if abs(h[0] - top[0]) < 0.06 and h[1] in ("steam", "rawg") and top[1] not in ("steam", "rawg"):
+            top = h
+            break
+    logger.info(
+        "自动匹配主来源=%s %s (%.3f)  [全部候选: %s]",
+        top[1], top[2], top[0],
+        ", ".join("%s=%.3f" % (h[1], h[0]) for h in hits),
+    )
+    return top[1], top[2]
 
 async def refresh_game_metadata(game_id: int) -> None:
     async with SessionLocal() as session:
@@ -971,28 +1222,44 @@ async def refresh_game_metadata(game_id: int) -> None:
         if game.source_type and game.source_type != "custom":
             source_data[game.source_type] = {k: v for k, v in raw_metadata.items() if k not in ("resource_type", "resource_url", "play_status", "original_data")}
             source_ids[game.source_type] = game.source_id
-        # 刷新其他已有来源
-        for src, sid in list(source_ids.items()):
-            if src == game.source_type or not sid:
-                continue
-            try:
-                if src == "rawg":
-                    src_meta = await RawgClient().get_game_detail(sid)
-                elif src == "steam":
-                    src_meta = await get_steam_detail(sid)
-                elif src == "vndb":
-                    src_meta = await get_vndb_detail(sid)
-                elif src == "dlsite":
-                    src_meta = await get_dlsite_detail(sid)
-                else:
+        # 刷新其他已有来源 —— 并发执行（历史为串行 for，每个来源约 1s，累计成为主要耗时）
+        async def _refresh_one(src: str, sid: str):
+            if src == "rawg":
+                return src, await RawgClient().get_game_detail(sid)
+            if src == "steam":
+                return src, await get_steam_detail(sid)
+            if src == "vndb":
+                return src, await get_vndb_detail(sid)
+            if src == "dlsite":
+                return src, await get_dlsite_detail(sid)
+            return src, None
+
+        _pending = [(s, sid) for s, sid in source_ids.items() if s != game.source_type and sid]
+        if _pending:
+            _res = await asyncio.gather(
+                *(_refresh_one(s, sid) for s, sid in _pending),
+                return_exceptions=True,
+            )
+            for (src, _sid), r in zip(_pending, _res):
+                if isinstance(r, Exception):
+                    logger.warning("多来源刷新：game_id=%s, source=%s 失败: %s", game.id, src, r)
                     continue
-                source_data[src] = src_meta
-                logger.info("多来源刷新：game_id=%s, source=%s 成功", game.id, src)
-            except Exception as e:
-                logger.warning("多来源刷新：game_id=%s, source=%s 失败: %s", game.id, src, e)
+                _s, src_meta = r
+                if src_meta:
+                    source_data[_s] = src_meta
+                    logger.info("多来源刷新：game_id=%s, source=%s 成功", game.id, _s)
         # 尝试补充新来源（搜索匹配）
+        # 提前终止优化：一旦某个来源以高置信命中（>= MATCH_STRONG），
+        # 说明该游戏已被可靠定位，后续低优先级来源的搜索意义不大 —— 跳过以省时。
+        _strong_hit = any(
+            isinstance(v, dict) and v.get("title") for v in source_data.values()
+        ) and len([k for k, v in source_ids.items() if v]) >= 2
         for src in ["steam", "rawg", "vndb", "dlsite"]:
             if src in source_ids and source_ids[src]:
+                continue
+            if _strong_hit and src in ("vndb", "dlsite") and "steam" in source_ids and "rawg" in source_ids:
+                # 已有 steam+rawg 双源命中（PC 游戏足够），不必再花时间搜 gal 向来源
+                logger.info("多来源刷新：game_id=%s 跳过 %s（已有多源命中）", game.id, src)
                 continue
             try:
                 if src == "steam":
@@ -1036,7 +1303,7 @@ async def refresh_game_metadata(game_id: int) -> None:
                             continue
                     if picked is None and ordered:
                         # 相似度太低直接放弃，避免乱配（如 "sandbox" -> 无关游戏）
-                        if _steam_rank(ordered[0]) >= 0.4:
+                        if _steam_rank(ordered[0]) >= _MATCH_THRESHOLD["steam"]:
                             picked = ordered[0]
                     if picked:
                         source_ids["steam"] = picked["source_id"]
@@ -1080,7 +1347,7 @@ async def refresh_game_metadata(game_id: int) -> None:
                             t = cand.get("title", "")
                             return max((title_similarity(g, t) for g in rank_group if g), default=0.0)
                         best = max(results, key=_rawg_rank)
-                        if _rawg_rank(best) >= 0.4:
+                        if _rawg_rank(best) >= _MATCH_THRESHOLD["rawg"]:
                             source_ids["rawg"] = best["source_id"]
                             source_data["rawg"] = await rawg_client.get_game_detail(best["source_id"])
                 elif src == "vndb":
@@ -1103,11 +1370,13 @@ async def refresh_game_metadata(game_id: int) -> None:
                         def _vndb_rank(item):
                             t = item.get("title", "")
                             a = item.get("alias", "") or ""
-                            return max((title_similarity(g, t) for g in rank_group if g), default=0.0) * 1.0 + \
-                                   max((title_similarity(g, a) for g in rank_group if g), default=0.0) * 0.8
+                            st = max((title_similarity(g, t) for g in rank_group if g), default=0.0)
+                            sa = max((title_similarity(g, a) for g in rank_group if g), default=0.0) if a else 0.0
+                            # 取较大者而非相加：相加会让两个弱命中凑成高分
+                            return max(st, sa * 0.7)
                         best = max(vndb_pool, key=_vndb_rank)
                         # 相似度校验：标题差太远则不采纳，避免乱配（如 "sandbox" -> 无关作品）
-                        if _vndb_rank(best) >= 0.5:
+                        if _vndb_rank(best) >= _MATCH_THRESHOLD["vndb"]:
                             source_ids["vndb"] = best["source_id"]
                             source_data["vndb"] = await get_vndb_detail(best["source_id"])
                 elif src == "dlsite":
@@ -1131,10 +1400,10 @@ async def refresh_game_metadata(game_id: int) -> None:
                                 score = title_similarity(game.title, c.get("title", ""))
                                 if score > ds_best_score:
                                     ds_best, ds_best_score = c, score
-                            if ds_best_score >= 0.6:
+                            if ds_best_score >= 0.75:
                                 break
                         # 相似度达标才采纳，避免乱配
-                        if ds_best and ds_best_score >= 0.5:
+                        if ds_best and ds_best_score >= _MATCH_THRESHOLD["dlsite"]:
                             workno = ds_best["source_id"]
                     if workno:
                         source_ids["dlsite"] = workno
@@ -1153,11 +1422,21 @@ async def refresh_game_metadata(game_id: int) -> None:
 # ==================== 手动匹配 / 重新翻译 ====================
 
 
-async def find_match_candidates(game_id: int, limit_per_source: int = 5) -> list[dict]:
+async def find_match_candidates(game_id: int, limit_per_source: int = 6) -> list[dict]:
     """为指定游戏在各数据源搜索候选，返回带相似度的候选列表（按相似度降序）。
 
     类似飞牛影视的「手动匹配」：把多个来源的候选一起列出来，由用户选择。
+
+    改进：
+      * 四个来源 + 多个探针**并发**搜索，显著缩短等待时间；
+      * 用修复后的 title_similarity 打分（短标题不再虚高）；
+      * 过滤掉相似度近乎 0 的噪声候选（低于 _MATCH_FLOOR 直接丢弃），
+        避免出现"相似度 0%"的无意义列表；
+      * 已关联来源的候选置顶并标记。
     """
+    # 手动匹配的下限：低于此值的候选不展示（用户仍可通过修改游戏名重试）
+    _MATCH_FLOOR = 0.30
+
     async with SessionLocal() as session:
         game = await session.get(Game, game_id)
         if not game:
@@ -1171,19 +1450,19 @@ async def find_match_candidates(game_id: int, limit_per_source: int = 5) -> list
         except Exception:
             source_data = {}
 
-        # 搜索用的探针：英文名（若有）优先，其次标题与别名候选
-        eng_name = ""
+        # 搜索探针：英文名（若有）优先，其次标题与别名候选
+        eng_names: list[str] = []
         for v in source_data.values():
             if isinstance(v, dict) and v.get("english_name"):
-                eng_name = v["english_name"]
-                break
+                eng_names.append(str(v["english_name"]))
+        # 多来源的英文名都收集（不同来源可能给出不同的英文名）
         probes: list[str] = []
-        for c in ([eng_name] if eng_name else []) + [game.title] + alias_candidates(game.title):
+        for c in eng_names + [game.title] + alias_candidates(game.title):
             if c and c.lower() not in {x.lower() for x in probes}:
                 probes.append(c)
-        probes = probes[:4]
+        probes = probes[:5]
 
-        rank_group = [g for g in ([eng_name, game.title] + alias_candidates(game.title)) if g]
+        rank_group = [g for g in (eng_names + [game.title] + alias_candidates(game.title)) if g]
         candidates: list[dict] = []
         seen: set[tuple[str, str]] = set()
 
@@ -1194,9 +1473,12 @@ async def find_match_candidates(game_id: int, limit_per_source: int = 5) -> list
             seen.add((source, sid))
             t = item.get("title", "")
             a = item.get("alias", "") or ""
-            sim = max((title_similarity(g, t) for g in rank_group), default=0.0)
-            if a:
-                sim = max(sim, max((title_similarity(g, a) for g in rank_group), default=0.0) * 0.9)
+            # 标题与别名分别算，取较大者（别名权重 0.9：别名可信度略低于正式标题）
+            sim_t = max((title_similarity(g, t) for g in rank_group), default=0.0)
+            sim_a = max((title_similarity(g, a) for g in rank_group), default=0.0) if a else 0.0
+            sim = max(sim_t, sim_a * 0.9)
+            if sim < _MATCH_FLOOR:
+                return          # 过滤噪声候选
             candidates.append({
                 "source_type": source,
                 "source_id": sid,
@@ -1209,32 +1491,47 @@ async def find_match_candidates(game_id: int, limit_per_source: int = 5) -> list
                 "already_linked": str(source_ids.get(source, "")) == sid,
             })
 
-        for probe in probes:
-            # RAWG
+        # ---- 并发搜索：每个探针 x 每个来源 ----
+        async def _search_rawg(probe: str):
             try:
-                for item in (await RawgClient().search_games(probe, page_size=limit_per_source))[:limit_per_source]:
-                    _add("rawg", item)
+                items = await RawgClient().search_games(probe, page_size=limit_per_source)
+                for it in items[:limit_per_source]:
+                    _add("rawg", it)
             except Exception as e:
                 logger.warning("手动匹配 rawg 搜索失败 %s: %s", probe, e)
-            # VNDB
+
+        async def _search_vndb(probe: str):
             try:
-                for item in (await search_vndb(probe))[:limit_per_source]:
-                    _add("vndb", item)
+                for it in (await search_vndb(probe))[:limit_per_source]:
+                    _add("vndb", it)
             except Exception as e:
                 logger.warning("手动匹配 vndb 搜索失败 %s: %s", probe, e)
-            # Steam（storesearch 是摘要，跟一个 detail 补齐封面/日期）
+
+        async def _search_steam(probe: str):
             try:
-                for item in (await search_steam(probe))[:limit_per_source]:
-                    _add("steam", item)
+                # Steam storesearch 是摘要，需补 detail 才有封面/日期；只对高分候选补
+                items = (await search_steam(probe))[:limit_per_source]
+                for it in items:
+                    _add("steam", it)
             except Exception as e:
                 logger.warning("手动匹配 steam 搜索失败 %s: %s", probe, e)
-            # DLsite
+
+        async def _search_dlsite(probe: str):
             try:
                 from .clients.dlsite_client import DlsiteClient
-                for item in (await DlsiteClient().search_games(probe, page_size=limit_per_source))[:limit_per_source]:
-                    _add("dlsite", item)
+                items = await DlsiteClient().search_games(probe, page_size=limit_per_source)
+                for it in items[:limit_per_source]:
+                    _add("dlsite", it)
             except Exception as e:
                 logger.warning("手动匹配 dlsite 搜索失败 %s: %s", probe, e)
+
+        tasks = []
+        for probe in probes:
+            tasks.append(_search_rawg(probe))
+            tasks.append(_search_vndb(probe))
+            tasks.append(_search_steam(probe))
+            tasks.append(_search_dlsite(probe))
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         # 按相似度降序；同分优先已关联来源
         candidates.sort(key=lambda c: (c["similarity"], c["already_linked"]), reverse=True)
