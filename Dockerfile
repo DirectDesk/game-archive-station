@@ -2,7 +2,11 @@ FROM node:22-alpine AS frontend-build
 WORKDIR /build/frontend
 COPY frontend/package.json ./
 COPY frontend/package-lock.json ./
-RUN npm ci
+# 使用国内 npm 镜像源：本机网络下 registry.npmjs.org 会被解析到 IPv6 且
+# TLS 证书校验失败（ERR_TLS_CERT_ALTNAME_INVALID），导致 npm ci 报出
+# 误导性的 "Exit handler never called!"。npmmirror.com 实测可用。
+# 注：--registry 不会写入 package-lock.json 的 resolved 字段，仅影响本次安装。
+RUN npm ci --registry=https://registry.npmmirror.com
 COPY frontend/ ./
 RUN npm run build
 
