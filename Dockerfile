@@ -13,6 +13,7 @@ RUN apk add --no-cache libstdc++
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/app ./app
+COPY backend/tools ./tools
 COPY --from=frontend-build /build/frontend/dist ./frontend/dist
 RUN mkdir -p /app/data
 EXPOSE 8000
