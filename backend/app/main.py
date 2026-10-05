@@ -59,11 +59,21 @@ async def lifespan(app: FastAPI):
         await connection.execute(text("UPDATE games SET resource_type = 'web_link' WHERE resource_type = 'cloud_link'"))
         await connection.execute(text("UPDATE games SET play_status = 'favorite' WHERE play_status = 'archived'"))
         await connection.execute(text("UPDATE games SET play_status = 'playing' WHERE play_status = 'downloading'"))
-        # 清理 resource_url 重复的记录（保留 id 最小的）
+        # 清理 resource_url 重复的记录（保留 id 最小的）。
+        # **重要约束**：仅对「指向具体文件」的 url 去重。
+        # 目录型 url（以 '/' 结尾，如 '/vol/baidu/'）常被多条记录共享，
+        # 按 url 分组会把它们误判为重复并删除合法记录（历史事故：id=20/23/25 被误删）。
         await connection.execute(text("""
             DELETE FROM games WHERE id NOT IN (
-                SELECT MIN(id) FROM games WHERE resource_url != '' GROUP BY resource_url
-            ) AND resource_url != ''
+                SELECT MIN(id) FROM games
+                WHERE resource_url != ''
+                  AND resource_url NOT LIKE '%/'
+                  AND LENGTH(resource_url) > 12
+                GROUP BY resource_url
+            )
+            AND resource_url != ''
+            AND resource_url NOT LIKE '%/'
+            AND LENGTH(resource_url) > 12
         """))
     # 预加载翻译术语表到内存
     from .translation_service import translation_service as _ts
