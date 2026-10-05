@@ -37,9 +37,10 @@ async def scan_status():
 async def _trigger(full: bool) -> dict:
     if scanner.running:
         raise HTTPException(409, "已有扫描任务正在执行")
-    task = task_manager.create("等待开始扫描")
+    mode_label = "全量扫描" if full else "增量扫描"
+    task = task_manager.create(f"{mode_label}：任务已创建")
     task_manager.latest_scan_id = task["id"]
-    task_manager.run(task, scanner.scan(task, full=full))
+    task_manager.run(task, scanner.scan(task, full=full), start_message=f"{mode_label}：正在扫描目录")
     return task
 
 

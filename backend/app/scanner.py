@@ -50,15 +50,21 @@ class LibraryScanner:
     _NON_GAME_KEYWORDS = (
         "补丁", "修改器", "存档", "攻略", "原声", "画集", "设定集",
         "soundtrack", "trainer", "artbook", "wallpaper", ".patch.",
+        # 附件型单元：mod / 升级档 / 未加密 / 汉化补丁 / DLC 解锁 / 修改工具
+        ".mod", ".update", ".crack", ".dlc", ".fix", ".hotfix", ".keygen",
+        "modpack", "crackfix", "unlocker", "汉化", "免dvd", "免安装",
     )
     # 压缩包分包命名模式（xxx.part01.rar / xxx.r00 / xxx.z01 / xxx.001 / xxx.7z.001 / xxx.zip.001）
     _PART_RES = [
         re.compile(r"(?i)\.part0*\d+\.rar$"),
         re.compile(r"(?i)\.part0*\d+\.zip$"),
+        re.compile(r"(?i)\.part0*\d+\.7z$"),
+        re.compile(r"(?i)\.part0*\d+\.exe$"),   # 自解压分包首包（xx.part01.exe）
         re.compile(r"(?i)\.r\d{2,3}$"),
         re.compile(r"(?i)\.z\d{2,3}$"),
         re.compile(r"(?i)\.7z\.\d{3}$"),
         re.compile(r"(?i)\.zip\.\d{2,3}$"),
+        re.compile(r"(?i)\.tar\.gz\.\d{3}$"),
         re.compile(r"(?i)\.\d{3}$"),
     ]
 
@@ -86,18 +92,90 @@ class LibraryScanner:
         stem = lower.rsplit(".", 1)[0]
         return any(keyword in stem for keyword in cls._NON_GAME_KEYWORDS)
 
+    # 数据分包/附属文件后缀：与同目录主程序（apk/exe 等）合并为同一游戏单元
+    _DATA_SIDECAR_EXTS = {".obb", ".bin", ".dat", ".pak", ".arc"}
+    _DATA_SIDECAR_NAMES = {"patch", "main", "data", "asset", "assets", "cache"}
+
+    @classmethod
+    def _merge_data_sidecars(cls, units: list) -> list:
+        """把数据分包（.obb 等）并入同目录的主程序单元（.apk/.exe/...）。
+
+        - 同目录存在主程序时：obb 等附属文件的大小计入该单元，附属文件不再单独成单元。
+        - 同目录无主程序（如 Danganronpa 的 jp.co.spike_chunsoft.DR2/ 只有 obb）时：
+          整个目录视为 1 个单元，用目录名作为单元名，交由上层以父目录名刮削。
+        """
+        if not units:
+            return units
+        # 只有"数据分包"后缀（.obb 等）才参与归并；普通文件一律各自为独立单元，
+        # 否则根目录下多个独立游戏会被错误合并成 1 个单元。
+        main_exts = {"apk", "exe", "msi", "pkg", "app", "ipa", "xapk"}
+        by_dir: dict[str, dict] = {}
+        passthrough: list = []
+        for name, path, size in units:
+            ext = path.name.rsplit(".", 1)[-1].lower() if "." in path.name else ""
+            is_sidecar = ("." + ext) in cls._DATA_SIDECAR_EXTS if ext else False
+            d = str(getattr(path, "parent", "") or "")
+            if not is_sidecar:
+                passthrough.append((name, path, size))
+                if ext in main_exts:
+                    by_dir.setdefault(d, {"main": None, "side": []})["main"] = [name, path, size]
+                continue
+            by_dir.setdefault(d, {"main": None, "side": []})["side"].append((name, path, size))
+
+        merged: list = list(passthrough)
+        for d, slot in by_dir.items():
+            main = slot["main"]
+            side = slot["side"]
+            if not side:
+                continue
+            if main is not None:
+                # 数据分包并入同目录主程序：主程序单元大小累加，附属不再单独存在
+                extra = sum(s for _n, _p, s in side)
+                merged = [u for u in merged if u[1] is not main[1]]
+                merged.append((main[0], main[1], main[2] + extra))
+                logger.debug("数据分包并入主程序：%s (+%d bytes, %d 个附属)",
+                             main[0], extra, len(side))
+                continue
+            # 同目录无主程序：向上查找最近的祖先目录，若存在主程序则并入之
+            # （安卓数据包常见形态：Foo.apk 与 Foo 数据目录并列）
+            from pathlib import Path as _P
+            total = sum(s for _n, _p, s in side)
+            _cur = _P(d)
+            _attached = False
+            for _up in _cur.parents:
+                _up_slot = by_dir.get(str(_up))
+                if _up_slot and _up_slot["main"] is not None:
+                    _m = _up_slot["main"]
+                    _extra = sum(s for _n, _p, s in _up_slot["side"]) + total
+                    merged = [u for u in merged if u[1] is not _m[1]]
+                    merged.append((_m[0], _m[1], _m[2] + _extra))
+                    _up_slot["side"] = []  # 已消费，避免下方重复处理
+                    logger.debug("数据目录 %s 并入祖先主程序：%s (+%d bytes)",
+                                 d, _m[0], _extra)
+                    _attached = True
+                    break
+            if not _attached:
+                # 完全孤立的数据目录：整目录算 1 个单元，用目录名刮削
+                dir_name = _cur.name or side[0][0]
+                merged.append((dir_name, side[0][1], total))
+                logger.debug("数据目录无主程序，%d 个数据分包合并为 1 个单元：%s",
+                             len(side), d)
+        return merged
+
     @classmethod
     def _group_files(cls, files: list) -> list:
         """把文件列表按单元 key 分组，返回 [(单元名, 主文件路径, 总大小)]。
 
         主文件选择：优先无分包标记的压缩包主包（.rar/.zip/.7z/.iso 等），否则组内第一个文件。
+        分组 key = (相对子目录, 单元名)，避免不同子目录下的同名文件被错误归并。
         """
-        groups: dict[str, list] = {}
+        groups: dict[tuple[str, str], list] = {}
         for file_path, size in files:
             key = cls._unit_key(file_path.name)
-            groups.setdefault(key, []).append((file_path, size))
+            subdir = str(getattr(file_path, "parent", "") or "")
+            groups.setdefault((subdir, key), []).append((file_path, size))
         units = []
-        for key, members in groups.items():
+        for (_subdir, key), members in groups.items():
             main = None
             for file_path, _size in members:
                 name = file_path.name.lower()
@@ -134,7 +212,7 @@ class LibraryScanner:
         valid = [(fp, size) for fp, size in all_files if not cls._is_ignored_file(fp.name)]
         if not valid:
             return []
-        return cls._group_files(valid)
+        return cls._merge_data_sidecars(cls._group_files(valid))
 
     @staticmethod
     async def _entries(path: Path) -> tuple[list, list]:
@@ -615,6 +693,10 @@ class LibraryScanner:
                 for unit_name, unit_path, unit_size in file_units:
                     if await self._create_game_from_folder(unit_path, resource_type, config, search_name=unit_name, known_size=unit_size):
                         task["discovered_games"] += 1
+                    task["message"] = (
+                        f"正在扫描：已读取 {task['scanned_directories']} 个目录，"
+                        f"发现 {task['discovered_games']} 个游戏"
+                    )
                     await asyncio.sleep(settings.scan_throttle_ms / 1000)
 
                 # 根目录下一级目录：游戏单位（参照飞牛影视）
@@ -629,6 +711,10 @@ class LibraryScanner:
                             pass
                     task["scanned_directories"] += 1
                     task["logs"] = (task["logs"] + [f"已读取：{directory}"])[-20:]
+                    task["message"] = (
+                        f"正在扫描：已读取 {task['scanned_directories']} 个目录，"
+                        f"发现 {task['discovered_games']} 个游戏"
+                    )
                     try:
                         units = await self._analyze_folder(directory)
                     except OSError as exc:

@@ -56,8 +56,10 @@ class TaskManager:
             else:
                 asyncio.run_coroutine_threadsafe(save(), loop)
 
-    def start(self, task: dict):
+    def start(self, task: dict, message: str | None = None):
         task["status"], task["started_at"] = "running", datetime.utcnow()
+        if message is not None:
+            task["message"] = message
         self._persist(task)
 
     def complete(self, task: dict, message: str | None = None):
@@ -82,9 +84,9 @@ class TaskManager:
     def get(self, task_id: str) -> dict | None:
         return self.tasks.get(task_id)
 
-    def run(self, task: dict, coroutine):
+    def run(self, task: dict, coroutine, start_message: str | None = None):
         async def wrapped():
-            self.start(task)
+            self.start(task, message=start_message)
             try:
                 await coroutine
             except Exception as exc:
