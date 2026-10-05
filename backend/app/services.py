@@ -162,6 +162,30 @@ def game_type_str(game: "Game", source_data: dict | None = None) -> str:
     return ",".join(infer_game_type(game, source_data))
 
 
+def display_title(game: "Game") -> str:
+    """展示用游戏名 = title_cn or title（中文优先）。
+
+    字段语义（v1.7.0 起）：
+      * ``title``    —— 原始名（来源站点的英文/日文原名），不再被翻译覆盖
+      * ``title_cn`` —— 中文译名；为空表示暂无译名
+      * ``alias``    —— 别名（罗马音/其它语言名）
+
+    历史背景：在拆字段之前，翻译会把中文译名**直接写进 title**，
+    导致「用户想要的名字」与「来源给的名字」共用一个字段——
+    改名会被原文打回（如 id=14「跳回 elf」），原文也只能靠
+    original_data 那个 Text 大 JSON 留档。拆开后各自归位。
+
+    注意：跨源搜索探针（build_probes）应当继续用 ``game.title``（外文名），
+    拿中文名去搜 RAWG/Steam 命中率会明显下降。
+    """
+    if game is None:
+        return ""
+    cn = (getattr(game, "title_cn", "") or "").strip()
+    if cn:
+        return cn
+    return (game.title or "").strip()
+
+
 async def resolve_tags(game: Game, config: SystemConfig, requested_source: str = "", db: AsyncSession = None) -> str:
     """按配置优先级从 original_data 中选择标签；返回选中的标签字符串。"""
     try:
@@ -1102,16 +1126,22 @@ async def retag_games_from_glossary(db: AsyncSession, apply_title: bool | None =
         changed = new_tags != current_tags
         if changed:
             game.tags = new_tags
-        # title 类 + general 通用术语同步到标题
-        # 保护：默认不覆盖 game.title，避免回归/术语表变更时冲掉用户手工改好的译名。
-        # 如需强制同步，显式传 apply_title=True（或在系统配置里关闭 keep_user_title）。
+        # title 类 + general 术语同步到**中文译名 title_cn**。
+        #
+        # v1.7.0 语义变更：title 现在是「原始名」，不再被翻译覆盖，
+        # 因此这段逻辑不再有「冲掉用户译名」的风险——它改的是 title_cn。
+        # 历史上靠 keep_user_title 全局禁用同步来规避风险，那会让所有游戏
+        # 都不再跟随术语表更新；拆字段后该补丁已无必要。
+        # apply_title 参数保留仅为向后兼容（含义变为「是否同步 title_cn」）。
         _apply_title_enabled = apply_title
         if _apply_title_enabled is None:
-            _apply_title_enabled = not await _keep_user_title_default(db)
+            _apply_title_enabled = True
         if _apply_title_enabled:
-            new_title = _apply_general(_apply_title(game.title or ""))
-            if new_title != (game.title or ""):
-                game.title = new_title
+            # 以「原始名」为源做术语映射，结果落到 title_cn
+            _src_for_cn = (game.title_cn or "") or (game.title or "")
+            new_cn = _apply_general(_apply_title(_src_for_cn))
+            if new_cn != (game.title_cn or ""):
+                game.title_cn = new_cn
                 changed = True
         new_desc = _apply_general(game.description or "")
         if new_desc != (game.description or ""):
@@ -2061,11 +2091,16 @@ async def apply_match(game_id: int, source_type: str, source_id: str, set_primar
         }
 
         if set_primary:
+            # v1.7.0：metadata["title"] 是**原始名**（翻译不再覆盖它），
+            # metadata["title_cn"] 是中文译名，两者都要写入。
+            # title_cn 用 get 兜底：metadata 无该键时保留游戏已有的译名。
             for field in ("title", "alias", "description", "developer", "publisher",
                           "release_date", "rating", "tags", "series", "source_type",
                           "source_id", "screenshots", "version", "original_data", "steam_appid"):
                 if field in metadata:
                     setattr(game, field, metadata[field])
+            if metadata.get("title_cn"):
+                game.title_cn = metadata["title_cn"]
             game.source_type = source_type
             game.source_id = source_id
             game.tag_source = source_type
@@ -2128,17 +2163,22 @@ async def retranslate_game(game_id: int, force: bool = False, keep_title: bool |
         _ensure_translatable()
 
         changed = False
-        # 重新翻译标题
-        # 保护：keep_title（默认读 keep_user_title 配置）为 True 时只翻译不覆盖 game.title，
-        # 避免用户手工改好的译名被冲掉。
+        # 重新翻译标题 -> 写入 title_cn（**不覆盖 title**）。
+        #
+        # v1.7.0：title 是原始名，翻译结果一律进 title_cn，因此不存在
+        # 「用户译名被冲掉」的问题，keep_title / keep_user_title 补丁不再需要。
+        # keep_title 参数保留仅为向后兼容（含义变为「是否写入 title_cn」）。
         _keep = keep_title
         if _keep is None:
-            _keep = await _keep_user_title_default(session)
-        src_title = original.get("title") or ""
-        if src_title:
-            new_title = await translation_service.translate(src_title, "title", session)
-            if new_title and new_title != game.title and not _keep:
-                game.title = new_title
+            _keep = False  # False = 允许写入 title_cn
+        src_title = original.get("title") or game.title or ""
+        if src_title and not _keep:
+            new_cn = await translation_service.translate(src_title, "title", session)
+            # 只在译出「不同的中文名」时写入
+            if (new_cn and new_cn != src_title
+                    and new_cn != (game.title_cn or "")
+                    and any("\u4e00" <= c <= "\u9fff" for c in new_cn)):
+                game.title_cn = new_cn
                 changed = True
         # 重新翻译简介
         src_desc = original.get("description") or ""
@@ -2166,7 +2206,8 @@ async def retranslate_game(game_id: int, force: bool = False, keep_title: bool |
 
         game.game_type = game_type_str(game, source_data)
         await session.commit()
-        return {"id": game.id, "changed": changed, "title": game.title}
+        return {"id": game.id, "changed": changed,
+                "title": game.title, "title_cn": game.title_cn}
 
 
 async def recompute_all_game_types() -> int:
@@ -2206,6 +2247,7 @@ async def refresh_vndb_game_metadata(game_id: int) -> None:
         metadata = await get_vndb_detail(source_id)
         metadata = await translation_service.translate_metadata(session, metadata)
         metadata["release_date"] = normalize_release_date(metadata.get("release_date"))
+        # v1.7.0：title=原始名，title_cn=中文译名，分别写入
         for field in (
             "title", "alias", "description", "developer", "publisher", "release_date",
             "rating", "tags", "series", "source_type", "source_id", "screenshots", "version",
@@ -2213,6 +2255,8 @@ async def refresh_vndb_game_metadata(game_id: int) -> None:
         ):
             if field in metadata:
                 setattr(game, field, metadata[field])
+        if metadata.get("title_cn"):
+            game.title_cn = metadata["title_cn"]
         game.cover_url = metadata.get("cover_url", "")
         await session.commit()
 
@@ -2239,6 +2283,7 @@ async def refresh_rawg_game_metadata(game_id: int) -> None:
         metadata = await RawgClient().get_game_detail(game.source_id)
         metadata = await translation_service.translate_metadata(session, metadata)
         metadata["release_date"] = normalize_release_date(metadata.get("release_date"))
+        # v1.7.0：title=原始名，title_cn=中文译名，分别写入
         for field in (
             "title", "alias", "description", "developer", "publisher", "release_date",
             "rating", "tags", "series", "source_type", "source_id", "screenshots", "version", "original_data",
@@ -2246,6 +2291,8 @@ async def refresh_rawg_game_metadata(game_id: int) -> None:
         ):
             if field in metadata:
                 setattr(game, field, metadata[field])
+        if metadata.get("title_cn"):
+            game.title_cn = metadata["title_cn"]
         # 先保存远程 URL；封面 CDN 临时失败不应使元数据刷新失败。
         game.cover_url = metadata["cover_url"]
         await session.commit()

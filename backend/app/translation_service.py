@@ -11,6 +11,16 @@ from .models import SystemConfig, TranslationGlossary
 logger = logging.getLogger(__name__)
 
 
+def _has_han(text: str) -> bool:
+    """是否含汉字（CJK 统一表意文字）。
+
+    用于判定「翻译结果是否真的译成了中文」——翻译器对不认识的名字
+    常原样返回，此时不应把原名写进 title_cn（否则 title_cn == title，
+    展示层 "title_cn or title" 虽不出错，但语义冗余）。
+    """
+    return any("\u4e00" <= c <= "\u9fff" for c in (text or ""))
+
+
 class TranslationService:
     def __init__(self):
         self.glossary: dict[tuple[str, str], str] = {}
@@ -186,6 +196,17 @@ class TranslationService:
         return result
 
     async def translate_metadata(self, db: AsyncSession, metadata: dict) -> dict:
+        """翻译元数据。
+
+        v1.7.0 语义变更（重要）：
+          * ``title`` 不再被翻译结果覆盖——它保留**原始名**（外文/日文原名）。
+          * 游戏名的翻译结果写入 ``title_cn``（中文译名）。
+          * 展示层统一用 ``display_title = title_cn or title``。
+
+        拆开之后：① 用户改中文名改的是 title_cn，原文 title 岿然不动，
+        不会再出现「改名被原文打回」；② 术语表变更可放心重翻译，
+        不必再靠 keep_user_title 全局禁用 title 同步。
+        """
         original = {key: metadata.get(key, "") for key in ("title", "alias", "description", "developer", "publisher", "tags", "series", "screenshots", "steam_appid")}
         metadata["original_data"] = json.dumps(original, ensure_ascii=False)
         config = await db.get(SystemConfig, 1)
@@ -201,30 +222,42 @@ class TranslationService:
             "魔法少女ノ魔女裁判": "魔法少女的魔女审判",
         }
         raw_title = metadata.get("title", "")
-        if raw_title in title_fixes:
-            metadata["title"] = title_fixes[raw_title]
-        translated = await self.translate_fields(metadata, {"title": "title", "description": "description", "tags": "tag"})
+        explicit_cn = title_fixes.get(raw_title, "")
+        # 简介/标签照常翻译；游戏名单独处理（走 title_cn）
+        translated = await self.translate_fields(metadata, {"description": "description", "tags": "tag"})
+        cn_title = explicit_cn
+        if not cn_title and raw_title:
+            cn_title = await self.translate(raw_title, "title", db)
+        # 只在确实译出「不同的中文名」时才写；原样返回则不写，
+        # 避免 title_cn 与 title 内容重复。
+        if cn_title and cn_title != raw_title and _has_han(cn_title):
+            translated["title_cn"] = cn_title
         return translated
 
     async def translate_rawg_metadata(self, db: AsyncSession, metadata: dict) -> dict:
+        """RAWG 元数据翻译。v1.7.0 起 title 保留原始名，译名进 title_cn。
+
+        旧逻辑里有一段「把原文名回填 alias、并在 title 被翻译时复原 title」的
+        补救代码——那是在绕开「title 被翻译覆盖」的副作用。
+        现在 title 根本不会被覆盖，原文名天然就在 title 里，补救已无意义，
+        故整段删除（原代码见 git 历史 v1.6.x）。
+        """
         metadata = await self.translate_metadata(db, metadata)
         title = metadata.get("title", "")
         version_match = re.search(r"(?i)(?<![a-z0-9])v\d+(?:\.\d+){1,3}(?![a-z0-9])", title)
         metadata.setdefault("version", version_match.group(0) if version_match else "")
-        # 明确游戏本地化名称优先，避免机器翻译遗漏标点/语义。
+        # 明确游戏本地化名称优先于机器翻译（这类名字机器翻译会漏标点/语义）。
+        # 注意：写入 title_cn，title 仍是来源原名。
         title_fixes = {"AI*Shoujo": "AI*少女", "AI＊Shoujo": "AI＊少女", "Magical Girl Witch Trial": "魔法少女的魔女审判"}
         normalized = re.sub(r"[._]+", " ", re.sub(r"(?i)\bv\d+(?:\.\d+){1,3}\b", "", title)).strip()
         if title in title_fixes or normalized.casefold() in {key.casefold() for key in title_fixes}:
-            metadata["title"] = next(value for key, value in title_fixes.items() if key.casefold() in {title.casefold(), normalized.casefold()})
-        original_title = json.loads(metadata.get("original_data", "{}")).get("title", title)
-        translated = metadata
-        if title in title_fixes or normalized.casefold() in {key.casefold() for key in title_fixes}:
-            translated["title"] = metadata["title"]
-        if original_title and not any("\u4e00" <= char <= "\u9fff" for char in original_title) and not translated.get("alias"):
-            translated["alias"] = original_title
-        if original_title and not any("\u4e00" <= char <= "\u9fff" for char in original_title) and translated.get("title") == original_title:
-            translated["title"] = original_title
-        return translated
+            metadata["title_cn"] = next(value for key, value in title_fixes.items() if key.casefold() in {title.casefold(), normalized.casefold()})
+        elif not metadata.get("title_cn") and normalized and normalized != title:
+            # 原名带版本号/分隔符时，用清洗后的名字再试一次翻译
+            cn = await self.translate(normalized, "title", db)
+            if cn and cn != normalized and _has_han(cn):
+                metadata["title_cn"] = cn
+        return metadata
 
     async def list_items(self, db: AsyncSession, category: str = "", q: str = "", page: int = 1, size: int = 50) -> list[TranslationGlossary]:
         query = select(TranslationGlossary)

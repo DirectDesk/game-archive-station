@@ -13,7 +13,15 @@ class Game(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # title 是「原始名」——来源站点的原名（英文/日文），**不再被翻译覆盖**。
+    # 语义变更（v1.7.0）：历史上翻译会把中文译名直接写进 title，导致
+    # 「用户想要的名字」与「来源给的名字」共用一个字段——改名会被原文打回，
+    # 且原文只能靠 original_data 那个 Text 大 JSON 留档。
+    # 现在拆开：title=原始名，title_cn=中文译名，
+    # 展示统一用 display_title = title_cn or title。
     title: Mapped[str] = mapped_column(String(255), index=True)
+    # 中文译名；为空表示暂无译名，展示时回退到 title
+    title_cn: Mapped[str] = mapped_column(String(255), default="", index=True)
     alias: Mapped[str] = mapped_column(String(500), default="")
     cover_url: Mapped[str] = mapped_column(String(1000), default="")
     cover_source: Mapped[str] = mapped_column(String(20), default="")
@@ -42,6 +50,8 @@ class Game(Base):
     game_type: Mapped[str] = mapped_column(String(50), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class SystemConfig(Base):
     """单行系统状态；create_all 会在已有数据库上平滑创建该新表。"""
 

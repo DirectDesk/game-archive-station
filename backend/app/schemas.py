@@ -1,11 +1,14 @@
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class GameBase(BaseModel):
+    # title = 原始名（来源站点的英文/日文原名），不再被翻译覆盖
     title: str = Field(min_length=1, max_length=255)
+    # title_cn = 中文译名；为空表示暂无译名（展示时回退到 title）
+    title_cn: str = Field(default="", max_length=255)
     alias: str = ""
     cover_url: str = ""
     cover_source: str = ""
@@ -46,6 +49,16 @@ class GameOut(GameBase):
     id: int
     created_at: datetime
     updated_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def display_title(self) -> str:
+        """展示用名字 = title_cn or title（中文优先）。
+
+        前端列表/详情默认显示这个字段。语义与 services.display_title 一致。
+        """
+        cn = (self.title_cn or "").strip()
+        return cn or (self.title or "").strip()
 
 
 class MetadataResult(BaseModel):

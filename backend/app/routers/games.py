@@ -24,7 +24,8 @@ async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_typ
     query = select(Game)
     if q:
         term = f"%{q}%"
-        query = query.where(or_(Game.title.ilike(term), Game.alias.ilike(term), Game.developer.ilike(term), Game.publisher.ilike(term), Game.series.ilike(term)))
+        # v1.7.0：title=原始名、title_cn=中文译名，两者都要能搜到
+        query = query.where(or_(Game.title.ilike(term), Game.title_cn.ilike(term), Game.alias.ilike(term), Game.developer.ilike(term), Game.publisher.ilike(term), Game.series.ilike(term)))
     if source_type:
         query = query.where(Game.source_type == source_type)
     # 游戏平台类型（pc/android/gal，可多选逗号分隔）。
@@ -177,8 +178,10 @@ async def create_game_from_source(
         source_ids[source_type] = source_id
 
     # 5. 创建游戏
+    # v1.7.0：title 为原始名，title_cn 为翻译产出的中文译名
     game = Game(
         title=metadata.get("title", ""),
+        title_cn=metadata.get("title_cn", ""),
         alias=metadata.get("alias", ""),
         cover_url=metadata.get("cover_url", ""),
         cover_source=source_type,
