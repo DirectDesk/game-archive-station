@@ -121,7 +121,7 @@ class RawgClient:
             "description": item.get("description_raw", "") or "",
             "developer": developers,
             "publisher": publishers,
-            "release_date": date.fromisoformat(release_date) if release_date else None,
+            "release_date": release_date if release_date else None,  # RAWG 返回的已是 ISO 字符串，不转 date 对象
             "rating": (item.get("rating") or 0) * 20 if item.get("rating") is not None else None,
             "tags": tags,
             "series": "",

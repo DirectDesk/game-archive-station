@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from sqlalchemy import select
@@ -304,6 +304,22 @@ class LibraryScanner:
             except Exception:
                 pass
             metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite", "file_size": _dir_size})
+            # 过滤掉 Game 模型不存在的字段（如 steam 的 english_name 等），避免创建时报错
+            _valid_fields = {column.name for column in Game.__table__.columns}
+            metadata = {k: v for k, v in metadata.items() if k in _valid_fields}
+            # release_date 是 Date 类型，需要转成 date 对象
+            # 可能是字符串、列表（DLsite返回 ['2026-09-26', '00:00:00']）、或已是 date 对象
+            _rd = metadata.get("release_date")
+            if _rd:
+                if isinstance(_rd, list):
+                    _rd = _rd[0] if _rd else None
+                if isinstance(_rd, str):
+                    try:
+                        metadata["release_date"] = date.fromisoformat(_rd.split("T")[0].split(" ")[0])
+                    except (ValueError, TypeError):
+                        metadata["release_date"] = None
+                elif not isinstance(_rd, date):
+                    metadata["release_date"] = None
             game = Game(**metadata)
             try:
                 await resolve_tags(game, config, "", db)
@@ -338,8 +354,13 @@ class LibraryScanner:
                 directory, resource_type = stack.pop()
                 try:
                     directory_mtime = await self._mtime(directory)
-                    # mtime 未变的目录整个子树均被剪枝，日常扫描只访问极少目录。
-                    if last_scan_at and directory_mtime <= last_scan_at.timestamp():
+                    # mtime 剪枝策略：
+                    # - nas_cloud（百度网盘挂载）：mtime 不可靠（新增文件不更新父目录mtime），不剪枝
+                    # - nas_local（本地目录）：mtime 可靠，正常剪枝
+                    # - 根路径：总是遍历
+                    is_root = directory in {root for root, _ in available_roots}
+                    can_skip_by_mtime = (not is_root) and (resource_type == "nas_local")
+                    if can_skip_by_mtime and last_scan_at and directory_mtime <= last_scan_at.timestamp():
                         task["skipped_directories"] += 1
                         continue
                     children = await self._directories(directory)

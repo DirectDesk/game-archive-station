@@ -101,7 +101,7 @@ class SteamClient:
             return None
         # 尝试 ISO 格式
         try:
-            return date.fromisoformat(date_str.strip())
+            return date_str.strip()
         except (ValueError, AttributeError):
             pass
         # 中文格式：2022 年 1 月 21 日

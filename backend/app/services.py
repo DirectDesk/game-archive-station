@@ -259,7 +259,7 @@ async def search_vndb(query: str) -> list[dict]:
         for item in response.json().get("results", []):
             released = item.get("released")
             try:
-                rel_date = date.fromisoformat(released) if released else None
+                rel_date = released if released else None
             except (ValueError, TypeError):
                 rel_date = None
             results.append({"source_type": "vndb", "source_id": item.get("id", ""), "title": item.get("title", ""), "alias": item.get("alttitle", ""), "cover_url": (item.get("image") or {}).get("url", ""), "description": item.get("description", ""), "developer": ", ".join(x.get("name", "") for x in item.get("developers", [])), "publisher": "", "release_date": rel_date, "rating": item.get("rating"), "tags": ", ".join(x.get("name", "") for x in item.get("tags", [])), "series": ""})
@@ -279,7 +279,7 @@ async def get_vndb_detail(source_id: str) -> dict:
         value = item[0]
         released = value.get("released")
         try:
-            release_date = date.fromisoformat(released) if released else None
+            release_date = released if released else None
         except (ValueError, TypeError):
             release_date = None
         vndb_title = value.get("title", "")

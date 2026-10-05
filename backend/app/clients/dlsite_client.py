@@ -119,7 +119,7 @@ class DlsiteClient:
         release_date = None
         if regist_date:
             try:
-                release_date = date.fromisoformat(regist_date.split(" ")[0])
+                release_date = regist_date.split(" "[0])
             except (ValueError, TypeError):
                 release_date = None
 
