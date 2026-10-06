@@ -5,3 +5,7 @@ node_modules/
 dist/
 .env
 /data/
+
+# 补丁脚本临时备份
+*.bak
+*.bak_*
