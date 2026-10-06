@@ -5,3 +5,4 @@ aiosqlite==0.20.0
 httpx==0.28.1
 python-multipart==0.0.20
 APScheduler==3.10.4
+pypinyin>=0.50

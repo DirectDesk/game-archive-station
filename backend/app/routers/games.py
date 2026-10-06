@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import json
+import re
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from sqlalchemy import desc, func, literal, or_, select
@@ -49,8 +50,31 @@ async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_typ
         _norm = func.replace(Game.tags, " ", "")
         _padded = literal(",") + _norm + literal(",")
         query = query.where(or_(*(_padded.like(f"%,{value.replace(' ', '')},%") for value in tags)))
-    query = query.order_by(desc(Game.rating) if sort == "rating" else desc(Game.created_at) if sort == "created" else desc(Game.updated_at))
+    # 排序：最近添加 / 按游戏名（原文）/ 按中文名 / 评分最高。
+    # 按名排序用 lower() 做大小写不敏感；中文名缺失时退回原文名参与排序（coalesce+nullif），
+    # 避免空串全部挤到最前。次级键用 id 保证稳定。
+    _name_key = func.lower(func.coalesce(func.nullif(Game.title_cn, ""), Game.title))
+    if sort == "rating":
+        query = query.order_by(desc(Game.rating), Game.id)
+    elif sort == "title":
+        query = query.order_by(func.lower(Game.title), Game.id)
+    elif sort == "title_cn":
+        query = query.order_by(_name_key, Game.id)
+    else:  # created（默认）：最近添加
+        query = query.order_by(desc(Game.created_at), Game.id)
     rows = list((await db.scalars(query)).all())
+    # 「按中文名」用**拼音序**：SQLite 无拼音排序，只能在 Python 侧排。
+    # 先剥掉前导标点（《》等，否则按码点会排到 ASCII 之后），再 lazy_pinyin；
+    # 非中文（ASCII/日文）原样参与，与拼音音节混排。
+    if sort == "title_cn" and rows:
+        from pypinyin import lazy_pinyin
+
+        def _pinyin_key(game: Game):
+            name = re.sub(r"^[^0-9A-Za-z\u4e00-\u9fff]+", "",
+                          (game.title_cn or game.title or "").strip().lower())
+            return (lazy_pinyin(name), game.id)
+
+        rows.sort(key=_pinyin_key)
     # 标签筛选口径必须与 /api/games/all-tags 面板**完全一致** —— 共用 _display_tags_of()。
     # 三种维度：来源（all / 具体来源）× 范围（主标签源 / 全部来源）× 语言（译文 / 原文）。
     # 只有「所有来源 / 主标签源 / 译文」走上面的 SQL 快路径，其余在 Python 侧比对（数据量小）。

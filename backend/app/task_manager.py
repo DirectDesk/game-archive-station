@@ -23,13 +23,13 @@ class TaskManager:
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
             pass
-        task = {"id": str(uuid4()), "status": "pending", "message": message, "started_at": None, "finished_at": None, "task_type": task_type, "game_id": game_id, "target_path": "", "copied_files": 0, "total_files": 0, "result_game_id": None}
+        task = {"id": str(uuid4()), "status": "pending", "message": message, "started_at": None, "finished_at": None, "task_type": task_type, "game_id": game_id, "target_path": "", "copied_files": 0, "total_files": 0, "copied_bytes": 0, "total_bytes": 0, "result_game_id": None}
         self.tasks[task["id"]] = task
         self._persist(task)
         return task
 
     def _persist(self, task: dict):
-        snapshot = {key: task.get(key) for key in ("status", "message", "started_at", "finished_at", "task_type", "game_id", "target_path", "copied_files", "total_files")}
+        snapshot = {key: task.get(key) for key in ("status", "message", "started_at", "finished_at", "task_type", "game_id", "target_path", "copied_files", "total_files", "copied_bytes", "total_bytes")}
         async def save():
             if self._persist_lock is None:
                 self._persist_lock = asyncio.Lock()

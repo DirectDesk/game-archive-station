@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -111,3 +111,6 @@ class AsyncTask(Base):
     target_path: Mapped[str] = mapped_column(String(2000), default="")
     copied_files: Mapped[int] = mapped_column(Integer, default=0)
     total_files: Mapped[int] = mapped_column(Integer, default=0)
+    # 字节级进度（大文件用；BigInteger 防 2GB+ 溢出）
+    copied_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_bytes: Mapped[int] = mapped_column(BigInteger, default=0)

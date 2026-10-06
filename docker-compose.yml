@@ -23,6 +23,12 @@ services:
       - SCAN_WEEKLY_FULL_CHECK=false
       # RAWG API Key 从同目录 .env 读取（.env 不入库；见 .env.example）
       - RAWG_API_KEY=${RAWG_API_KEY:-}
+      # 多线程下载引擎（见 backend/app/download_engine.py）：
+      # 挂载源（/vol/baidu）走「分段并发直读」，FUSE_THREADS 控制并发（4~8 最佳）。
+      # ARIA_* 仅在「有直链的云端网盘」时用到；secret 从同目录 .env 读取（不入库）。
+      - FUSE_THREADS=${FUSE_THREADS:-8}
+      - ARIA_RPC=${ARIA_RPC:-http://192.168.20.10:6800/jsonrpc}
+      - ARIA_SECRET=${ARIA_SECRET:-}
     volumes:
       # 修改左侧为飞牛本地存储中的实际目录。
       - /vol1/1000/docker/game-archive/data:/app/data
