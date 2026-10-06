@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
-from sqlalchemy import desc, or_, select
+from sqlalchemy import desc, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 
 
 @router.get("", response_model=list[GameOut])
-async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_type: str = "", play_status: str = "", tag: str = "", game_type: str = "", sort: str = "updated"):
+async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_type: str = "", play_status: str = "", tag: str = "", game_type: str = "", sort: str = "updated", original: bool = False):
     query = select(Game)
     if q:
         term = f"%{q}%"
@@ -39,10 +39,47 @@ async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_typ
     if play_status:
         query = query.where(Game.play_status == play_status)
     tags = [value.strip() for value in tag.split(",") if value.strip()]
-    if tags:
-        query = query.where(or_(*(Game.tags.ilike(f"%{value}%") for value in tags)))
+    # 标签筛选是**精确匹配**：Game.tags 以「, 」分隔存整串，
+    # 历史上的 ilike('%单人%') 会连「单人游戏」一起命中（实测「单人」应 6 款却筛出 11 款、
+    # 「萝莉」把「小胸女主角（非萝莉）」也算进去）。这里去掉空格后用逗号包裹再 LIKE，
+    # 只有「整个标签相等」才算命中。
+    if tags and not original:
+        _norm = func.replace(Game.tags, " ", "")
+        _padded = literal(",") + _norm + literal(",")
+        query = query.where(or_(*(_padded.like(f"%,{value.replace(' ', '')},%") for value in tags)))
     query = query.order_by(desc(Game.rating) if sort == "rating" else desc(Game.created_at) if sort == "created" else desc(Game.updated_at))
-    return list((await db.scalars(query)).all())
+    rows = list((await db.scalars(query)).all())
+    # 原文模式：筛选面板给的是「来源原文标签」（英文/日文），而 Game.tags 存的是译文，
+    # 只比 Game.tags 会一条都筛不到。这里在 Python 侧（数据量小）同时比对
+    # original_data / source_data 里的原文标签。
+    if tags and original:
+        rows = [game for game in rows if any(value in _all_tags_of(game) for value in tags)]
+    return rows
+
+
+def _all_tags_of(game: Game) -> set[str]:
+    """游戏身上的全部标签：译文串 + original_data / source_data 里的各来源原文串。"""
+    result: set[str] = set()
+
+    def _collect(value):
+        if isinstance(value, str):
+            result.update(part.strip() for part in value.split(",") if part.strip())
+        elif isinstance(value, list):
+            result.update(str(part).strip() for part in value if str(part).strip())
+
+    _collect(game.tags)
+    for blob in (game.original_data, game.source_data):
+        try:
+            data = json.loads(blob or "{}")
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        _collect(data.get("tags"))
+        for block in data.values():
+            if isinstance(block, dict):
+                _collect(block.get("tags"))
+    return result
 
 
 @router.get("/all-tags")
