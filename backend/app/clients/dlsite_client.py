@@ -97,6 +97,22 @@ class DlsiteClient:
             return "https:" + url
         return url
 
+    @classmethod
+    def sample_urls(cls, item: dict) -> list[str]:
+        """从 API 详情里取**真实截图** URL（`image_samples` 字段）。
+
+        ⚠️ 不要改成抓作品页 HTML 正则取图：作品页上除封面外**全是广告横幅**
+        （`media.vivion-bcs.com/...`、`dlsite.com/modpub/images/campaign/...`），
+        真实截图根本不在 HTML 里（前端另行异步加载），那样抓只会得到
+        「1 张封面 + N 张广告」。真截图只在 API 的 `image_samples`。
+        """
+        urls: list[str] = []
+        for sample in (item.get("image_samples") or []):
+            url = cls._full_url((sample or {}).get("url", ""))
+            if url and url not in urls:
+                urls.append(url)
+        return urls
+
     @staticmethod
     def extract_workno(text: str) -> str | None:
         """从文件夹名中提取 RJ/VJ/BJ 编号"""
@@ -138,8 +154,10 @@ class DlsiteClient:
         # 封面：image_main.url
         cover_url = DlsiteClient._full_url((item.get("image_main") or {}).get("url", ""))
 
-        # 截图：DLSite API 返回的 image_samples URL 对旧游戏常返回 404（DLSite 清理了旧截图存储），
-        # 暂不存入 screenshots，避免前端显示裂开的图片；后续可从详情页或其他数据源补截图。
+        # 截图：真截图只在 API 的 image_samples（见 sample_urls）。此处仍返回空列表，
+        # 实际截图由 fetch_game_screenshots -> _dlsite_screenshots 处理——因为部分
+        # 老作品/下架作品的 image_samples URL 会 404，需要下载环节逐个跳过。
+        # 历史教训：曾抓作品页 HTML 正则取图，结果把封面 + 一堆广告横幅当成了截图。
         screenshots = []
 
         version_match = re.search(

@@ -1364,12 +1364,22 @@ async def _vndb_screenshots(source_id: str) -> list[str]:
 
 
 async def _dlsite_screenshots(source_id: str) -> list[str]:
+    """DLsite 截图：**只用官方 API 的 image_samples**（真实截图）。
+
+    ⚠️ 不要退回「抓作品页 HTML 正则取图」：作品页上除封面外**全是广告横幅**
+    （`media.vivion-bcs.com/...`、`dlsite.com/modpub/images/campaign/...`），
+    真实截图不在 HTML 里（前端另行异步加载），那样抓只会得到「1 张封面 + N 张广告」。
+    真截图只在 API 的 `image_samples` 字段。
+
+    部分老作品 / 已下架作品的 `image_samples` URL 会 404，交给下载环节
+    （`fetch_game_screenshots` 里的 `raise_for_status` + `continue`）自动跳过即可。
+    """
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
-            response = await client.get(f"https://www.dlsite.com/maniax/work/=/product_id/{source_id}.html")
-            response.raise_for_status()
-        urls = re.findall(r'https?://[^"\']+\.(?:jpg|jpeg|png)', response.text, re.I)
-        return list(dict.fromkeys(urls))
+        from .clients.dlsite_client import DlsiteClient
+        item = await DlsiteClient().get_work_by_id(source_id)
+        if not item:
+            return []
+        return DlsiteClient.sample_urls(item)
     except Exception as e:
         logger.warning("DLsite 截图获取失败 %s: %s", source_id, e)
         return []
