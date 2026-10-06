@@ -498,12 +498,17 @@ class LibraryScanner:
                 if vndb_results:
                     # 相似度校验：vndb 搜索可能因一个宽泛词（如 "sandbox"）返回大量无关作品，
                     # 直接取首个结果会造成乱配；取相似度最高者且需达阈值。
+                    # query 侧必须包含**别名候选**（中文名 -> 罗马音，如 兰斯3 -> "Rance 3"），
+                    # 否则中文 query 与 VNDB 的罗马音/日文标题无字符重叠，所有候选分数趋近 0
+                    # （实测最高仅 0.09），低于阈值会让 VNDB 兜底形同虚设。与 Steam/DLsite 分支对齐。
+                    _vndb_qs = [q for q in ([raw_name, search_name] + alias_candidates(raw_name)) if q]
+
                     def _vndb_score(item):
+                        _t = item.get("title", "")
+                        _a = item.get("alias", "") or ""
                         return max(
-                            title_similarity(raw_name, item.get("title", "")),
-                            title_similarity(raw_name, item.get("alias", "") or ""),
-                            title_similarity(search_name, item.get("title", "")),
-                            title_similarity(search_name, item.get("alias", "") or ""),
+                            max((title_similarity(q, _t) for q in _vndb_qs), default=0.0),
+                            max((title_similarity(q, _a) for q in _vndb_qs), default=0.0),
                         )
 
                     best = max(vndb_results, key=_vndb_score)

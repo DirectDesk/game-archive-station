@@ -797,6 +797,24 @@ def _roman_to_int(token: str) -> int | None:
     return total if 1 <= total <= 30 else None
 
 
+def _norm_num_token(token: str) -> str:
+    """把「纯序号」词元归一，仅用于**词元序列比较**（不改动最终打分数值）。
+
+    '03' -> '3'；'iii' -> '3'（罗马数字，<=30）；其余原样返回。
+    目的：避免 '3' 与 '03'/'III' 被判为不同词元，从而误触发「系列作分代保护」
+    （例：'Rance 3' vs 'Rance 03 - Leazas Kanraku' 曾被压到 0.55）。
+    """
+    if not token:
+        return token
+    if token.isdigit():
+        return str(int(token))
+    if re.fullmatch(r"[ivx]{1,4}", token):
+        _v = _roman_to_int(token)
+        if _v is not None:
+            return str(_v)
+    return token
+
+
 def title_similarity(query: str, result_title: str) -> float:
     """标题相似度（0~1），用于跨源匹配候选打分。
 
@@ -993,7 +1011,12 @@ def _title_similarity_single_norm(query: str, result_title: str, norm_fn) -> flo
     #   长度比 20/25 = 0.8 >= 0.7，保持高分。
     if q == r:
         _sh, _lo = sorted([query, result_title], key=len)   # 升序：[短, 长]
-        if len(_sh) / max(len(_lo), 1) < 0.7:
+        # 豁免：较短一侧本身已带系列序号（如 'Rance 03'），而长串是以**同一序号**
+        # 开头的完整标题（'Rance 03 - Leazas Kanraku'）时，长串剩余部分只是**同一部
+        # 作品**的副标题，并非「本体 vs 衍生作」，不应降分。
+        #   例（豁免）：'Rance 03' vs 'Rance 03 - Leazas Kanraku'
+        #   例（仍降分）：'NEEDY STREAMER OVERLOAD' vs 'NEEDY STREAMER OVERLOAD: Typing of The Net'
+        if len(_sh) / max(len(_lo), 1) < 0.7 and not _series_numbers(_sh):
             score = min(score, 0.55)
     # 词首/词尾保护 + 系列作分代保护（均在「归一化不相等」时生效）。
     # 例（前缀）："carrion" vs "carrion fields"（不同作品）；
@@ -1003,8 +1026,10 @@ def _title_similarity_single_norm(query: str, result_title: str, norm_fn) -> flo
     else:
         # 用与 tokens 同源的清理序列（去除 "-"、"/"、"." 等仅作分隔的符号 token），
         # 否则 'Rance - -' 这类残留符号会让 token 序列判定失准（逃过前缀/后缀保护）。
-        _qt = [t for t in re.split(r"[^a-z0-9\u4e00-\u9fff\u3040-\u30ff]+", q.lower()) if t]
-        _rt = [t for t in re.split(r"[^a-z0-9\u4e00-\u9fff\u3040-\u30ff]+", r.lower()) if t]
+        # 序号词元先归一（'03'->'3'、'iii'->'3'），否则 "Rance 3" 与 "Rance 03 …" 的
+        # 剩余词元 {'3'} 与 {'03'} 无交集，会误触发下面的「系列作分代保护」压到 0.55。
+        _qt = [_norm_num_token(t) for t in re.split(r"[^a-z0-9\u4e00-\u9fff\u3040-\u30ff]+", q.lower()) if t]
+        _rt = [_norm_num_token(t) for t in re.split(r"[^a-z0-9\u4e00-\u9fff\u3040-\u30ff]+", r.lower()) if t]
 
         # ---- 系列作分代保护 ----
         # 两侧共享「系列名前缀」，但其后各代副标题**无任何交集**时，判为同系列不同代。
