@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import threading
 from datetime import datetime
 from uuid import uuid4
@@ -73,13 +74,23 @@ class TaskManager:
         self._persist(task)
 
     def update_progress(self, task: dict, **values):
+        """线程安全地更新任务进度。
+
+        ⚠️ `loop.call_soon_threadsafe` **只接受位置参数**，不能传 `**kwargs`，
+        否则在工作线程（如转存的 `asyncio.to_thread(_copy)`）里调用会抛
+        `TypeError: call_soon_threadsafe() got an unexpected keyword argument ...`，
+        使任务在首次上报进度时就失败（曾导致"转存到 NAS"整个功能不可用）。
+        """
         if threading.current_thread() is threading.main_thread():
-            task.update(values)
-            self._persist(task)
+            self._apply_progress(task, values)
             return
         loop = self.loop
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(self.update_progress, task, **values)
+            loop.call_soon_threadsafe(functools.partial(self._apply_progress, task, values))
+
+    def _apply_progress(self, task: dict, values: dict):
+        task.update(values)
+        self._persist(task)
 
     def get(self, task_id: str) -> dict | None:
         return self.tasks.get(task_id)

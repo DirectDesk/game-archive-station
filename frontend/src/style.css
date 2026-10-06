@@ -1,7 +1,21 @@
 @import "tailwindcss";
 
 @theme { --color-base: #101319; --color-panel: #1b2029; --color-accent: #79c64b; }
-body { @apply m-0 min-h-screen bg-base text-slate-100; font-family: Inter, "Microsoft YaHei", sans-serif; }
-input, select, textarea { @apply w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-accent; }
-button { @apply rounded-md px-3 py-2 text-sm font-medium transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50; }
-.btn { @apply bg-accent text-slate-950; }.btn-muted { @apply bg-slate-700 text-slate-100; }.panel { @apply rounded-xl border border-slate-700 bg-panel p-4; }
+
+/* ⚠️ 全局元素样式必须放在 @layer base 里。
+   未分层（unlayered）的 CSS 规则优先级**高于所有分层规则**，若把下面几条写在
+   @layer 之外，`input/select/textarea` 的 width:100% 就会盖掉工具类
+   （w-auto / w-20 / p-0 …），把「文字 + 控件」同行的布局挤成竖排
+   （典型症状：分页的「每页」两字上下叠成两行）。改动前先读
+   .workbuddy/memory 里关于 cascade layer 的记录。 */
+@layer base {
+  body { @apply m-0 min-h-screen bg-base text-slate-100; font-family: Inter, "Microsoft YaHei", sans-serif; }
+  input, select, textarea { @apply w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-accent; }
+  button { @apply rounded-md px-3 py-2 text-sm font-medium transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50; }
+}
+
+@layer components {
+  .btn { @apply bg-accent text-slate-950; }
+  .btn-muted { @apply bg-slate-700 text-slate-100; }
+  .panel { @apply rounded-xl border border-slate-700 bg-panel p-4; }
+}
