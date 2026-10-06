@@ -1323,19 +1323,10 @@ async def fetch_game_screenshots(game: Game, config: SystemConfig, requested_sou
 
 
 async def _vndb_screenshots(source_id: str) -> list[str]:
-    # 注意：这里要取的是「截图」screenshots，不是封面 image。
-    # VNDB /kana/vn 需在 fields 中显式请求 screenshots{id,url}；
-    # 历史上误写成 image.url（封面），导致把封面当成唯一「截图」缓存。
     async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(
-            "https://api.vndb.org/kana/vn",
-            json={"filters": ["id", "=", source_id], "fields": "screenshots{id,url}"},
-        )
+        response = await client.post("https://api.vndb.org/kana/vn", json={"filters": ["id", "=", source_id], "fields": "image.url"})
         response.raise_for_status()
-        results = response.json().get("results", [])
-        if not results:
-            return []
-        return [s.get("url", "") for s in (results[0].get("screenshots") or []) if s.get("url")]
+        return [(item.get("image") or {}).get("url", "") for item in response.json().get("results", [])]
 
 
 async def _dlsite_screenshots(source_id: str) -> list[str]:
@@ -2148,14 +2139,6 @@ async def apply_match(game_id: int, source_type: str, source_id: str, set_primar
                 await session.commit()
             except Exception:
                 await session.rollback()
-            # 换源后重新抓取截图：旧来源截图可能已失效或错配（VNDB 历史上把封面
-            # 当截图缓存），这里按新来源重新解析并缓存；失败不影响匹配结果。
-            try:
-                await fetch_game_screenshots(game, _cfg)
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                logger.warning("匹配后刷新截图失败：game_id=%s", game_id, exc_info=True)
         await session.refresh(game)
         return {"id": game.id, "game_type": game.game_type, "title": game.title}
 
