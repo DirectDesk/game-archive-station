@@ -1,4 +1,4 @@
-"""多线程下载引擎（参照 uc-downloader/docs/aria2-integration.md）。
+"""多线程下载引擎（参照 uc-downloader/docs/aria2-integration.md + use_bench.py）。
 
 按「源」自动选通道：
   · **fuse 挂载源**（/vol/baidu 这类 rclone/WebDAV 挂载的云盘）→ **分段并发直读**。
@@ -7,20 +7,25 @@
   · **有直链的云端网盘**（UC/PiKPak/夸克…）→ **aria2 JSON-RPC** 多连接。
   · **本地磁盘**（/vol/games）→ 顺序拷贝（磁盘并发无收益，反而抢磁头）。
 
+**读法必须与 `use_bench.py` / `mount_speed.py` 一致**（实测能跑满速）：
+`open(path, 'rb')` + **每线程守一段连续偏移** + `f.read(262144)` 小块。
+
+⚠️ 早期版本按「段」整段 `f.read(seg)`，而 `seg = max(8MB, size/线程数)`
+会随文件增大而暴涨（3.5GB 文件 → 440MB/线程）→ 8 线程要吃 3.5GB 内存；
+NAS 只有 8GB，大文件必然 OOM。现固定 **256KB 小块**，
+内存 = 线程数 × 256KB（≈2MB），**与文件大小无关**。
+
 实测踩过的坑（改这块务必对照）：
   1) 必须【分段连续读】，交错块会废掉 rclone 预读（掉到约 1/3）。
   2) 必须 ftruncate 到最终大小 + 按偏移 pwrite；否则读到 EOF 误判下完、
      多线程各自 seek 留空洞。
-  3) 窗口计数必须是「已派发 − 已落盘」；写成「已派发 + WINDOW > i」会在首轮
-     reader 全部 wait，而 writer 在等缓冲 → 第一次循环即死锁。
-  4) 写线程退出前必须把缓冲写完，否则丢尾巴。
-  5) aria2 方法失败返回 **HTTP 400 + JSON error body**，要先解析 body 再判状态码；
+  3) 每个线程**自己 open 一份句柄**：共享句柄的 seek+read 不是线程安全的。
+  4) aria2 方法失败返回 **HTTP 400 + JSON error body**，要先解析 body 再判状态码；
      数值字段是**字符串**，必须 int()。
 """
 import base64
 import json
 import os
-import queue
 import shutil
 import threading
 import time
@@ -31,11 +36,13 @@ import httpx
 
 from .config import settings
 
-# 每个线程独占的连续区间大小（百度实测 4~8 线程是甜点，16 反而降速）
-SEGMENT = 8 * 1024 * 1024
-WINDOW_MULT = 2          # 读线程领先写线程的最大块数
+# 单次 read() 的块大小，与 use_bench.py / mount_speed.py 一致（256KB）。
+BLOCK = 256 * 1024
+# 流式（iter_file_parallel）里每个线程最多领先消费端多少块（内存上限 = 线程数×此值×BLOCK）。
+WINDOW_BLOCKS = 16
 
 _aria_seq = [0]
+_pwrite_lock = threading.Lock()
 
 
 def human(n: float) -> str:
@@ -44,6 +51,16 @@ def human(n: float) -> str:
         if n < 1024 or unit == "TB":
             return "%.1f %s" % (n, unit)
         n /= 1024.0
+
+
+def _pwrite(fd: int, data: bytes, offset: int) -> int:
+    """按偏移写。Linux 用 os.pwrite；非 Linux 回退到加锁的 lseek+write。"""
+    try:
+        return os.pwrite(fd, data, offset)
+    except AttributeError:
+        with _pwrite_lock:
+            os.lseek(fd, offset, os.SEEK_SET)
+            return os.write(fd, data)
 
 
 # ---------------------------------------------------------------- 引擎判定
@@ -61,7 +78,7 @@ def _fuse_mounts() -> list[str]:
                 parts = line.split()
                 if len(parts) >= 3 and parts[2].startswith("fuse"):
                     out.append(parts[1].replace("\\040", " "))
-    except Exception:
+    except Exception:                                             # noqa: BLE001
         pass
     return out
 
@@ -69,7 +86,7 @@ def _fuse_mounts() -> list[str]:
 def is_fuse_mounted(path) -> bool:
     try:
         real = os.path.realpath(str(path))
-    except Exception:
+    except Exception:                                             # noqa: BLE001
         return False
     for mount in _fuse_mounts():
         if real == mount or real.startswith(mount.rstrip("/") + "/"):
@@ -100,93 +117,106 @@ def threads_for(engine: str) -> int:
 
 # ---------------------------------------------------------------- 分段并发直读
 
-def _seg_plan(size: int, threads: int):
-    """段大小与段数**必须由同一处算出**（reader / writer 共用），否则会死锁。"""
-    threads = max(1, min(16, int(threads)))
-    if size <= 0:
-        return SEGMENT, 1, threads
-    seg = max(SEGMENT, (size + threads - 1) // threads)
-    nseg = max(1, (size + seg - 1) // seg)
-    return seg, nseg, threads
+def _spans(size: int, threads: int, block: int = BLOCK):
+    """把文件按**块**切成 threads 段【连续】区间，每线程守一段。
+
+    返回 (nblocks, per, spans)；spans 为 [(线程号, 起始块, 结束块), ...]。
+    `per` 用于消费端把块号反查回线程号（owner = bi // per）。
+    """
+    nblocks = max(1, (size + block - 1) // block)
+    n = max(1, min(16, int(threads), nblocks))
+    per = (nblocks + n - 1) // n
+    spans = []
+    for t in range(n):
+        b0 = t * per
+        b1 = min(nblocks, b0 + per)
+        if b0 < b1:
+            spans.append((t, b0, b1))
+    return nblocks, per, spans
 
 
 def iter_file_parallel(path, threads: int = 8):
-    """按顺序产出文件分块（供 HTTP 流式响应）。fuse 源用它替代单流 FileResponse。"""
+    """按顺序产出文件分块（供 HTTP 流式响应）。fuse 源用它替代单流 FileResponse。
+
+    读法：每线程守一段连续块区间，各自 open 句柄 + 256KB 顺序读；
+    消费端按块号**顺序**产出，用「每线程领先窗口」限内存（不会因乱序死锁：
+    消费端卡在某块时，该块的线程必然没被窗口挡住）。
+    """
     path = str(path)
     size = os.path.getsize(path)
-    seg, nseg, threads = _seg_plan(size, threads)
     if size <= 0:
         return
-    state = {"next": 0, "consumed": 0, "stop": False, "err": ""}
+    nblocks, per, spans = _spans(size, threads)
+    state = {"stop": False, "err": "", "alive": len(spans)}
+    inflight = {t: 0 for t, _b0, _b1 in spans}
     cond = threading.Condition()
     buf: dict[int, bytes] = {}
-    window = threads * WINDOW_MULT
 
-    def reader():
+    def reader(t, b0, b1):
         try:
-            with open(path, "rb") as fh:
-                while True:
+            with open(path, "rb") as fh:        # 每线程独立句柄（共享句柄 seek 不安全）
+                fh.seek(b0 * BLOCK)
+                for bi in range(b0, b1):
                     with cond:
-                        if state["stop"] or state["next"] >= nseg:
-                            return
-                        if state["next"] - state["consumed"] >= window:
+                        while not state["stop"] and inflight[t] >= WINDOW_BLOCKS:
                             cond.wait(1)
-                            continue
-                        idx = state["next"]
-                        state["next"] += 1
-                    start = idx * seg
-                    remain = size - start
-                    if remain <= 0:
+                        if state["stop"]:
+                            return
+                    off = bi * BLOCK
+                    data = fh.read(min(BLOCK, size - off))
+                    if not data:
                         with cond:
+                            state["err"] = "提前 EOF @ %d" % off
                             state["stop"] = True
                             cond.notify_all()
                         return
-                    fh.seek(start)
-                    data = fh.read(min(seg, remain))
                     with cond:
-                        if data:
-                            buf[idx] = data
-                        else:
-                            state["stop"] = True
+                        buf[bi] = data
+                        inflight[t] += 1
                         cond.notify_all()
-                    if not data:
-                        return
         except Exception as exc:                                  # noqa: BLE001
             with cond:
                 state["err"] = str(exc)
                 state["stop"] = True
                 cond.notify_all()
+        finally:
+            with cond:
+                state["alive"] -= 1
+                cond.notify_all()
 
-    workers = [threading.Thread(target=reader, daemon=True) for _ in range(threads)]
-    for w in workers:
+    ws = [threading.Thread(target=reader, args=s, daemon=True) for s in spans]
+    for w in ws:
         w.start()
     try:
-        idx = 0
-        while idx < nseg:
+        for bi in range(nblocks):
             with cond:
-                while idx not in buf and not state["err"] and not (
-                        state["stop"] and state["next"] <= idx):
+                while (bi not in buf and not state["err"]
+                       and state["alive"] > 0 and not state["stop"]):
                     cond.wait(1)
                 if state["err"]:
                     raise RuntimeError(state["err"])
-                if idx in buf:
-                    data = buf.pop(idx)
-                    state["consumed"] += 1
-                    cond.notify_all()
-                else:
-                    break                      # stop 且该段缺失 → 数据不完整
+                if bi not in buf:
+                    break                      # 线程都退了且该块缺失 → 数据不完整
+                data = buf.pop(bi)
+                owner = bi // per
+                if owner in inflight:
+                    inflight[owner] -= 1
+                cond.notify_all()
             yield data
-            idx += 1
     finally:
         with cond:
             state["stop"] = True
             cond.notify_all()
-        for w in workers:
+        for w in ws:
             w.join(timeout=5)
 
 
 def copy_file_parallel(src, dst, threads: int = 8, progress_cb=None, cancel=None):
-    """单文件分段并发拷贝。返回 (ok, done_bytes, error)。"""
+    """单文件分段并发拷贝。返回 (ok, done_bytes, error)。
+
+    每线程守一段连续区间，256KB 小块读 → 直接 pwrite 到目标偏移；
+    不需要中央缓冲（因此内存恒定，且顺序无关）。
+    """
     src, dst = str(src), str(dst)
     size = os.path.getsize(src)
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
@@ -195,116 +225,63 @@ def copy_file_parallel(src, dst, threads: int = 8, progress_cb=None, cancel=None
         if progress_cb:
             progress_cb(0, 0)
         return True, 0, ""
-    seg, nseg, threads = _seg_plan(size, threads)
+    _nblocks, _per, spans = _spans(size, threads)
     fd = os.open(dst, os.O_WRONLY | os.O_CREAT)
     os.ftruncate(fd, size)                 # 关键：预分配到最终大小，否则读到 EOF 误判下完
-    state = {"next": 0, "flushed": 0, "done": 0, "stop": False, "err": ""}
-    cond = threading.Condition()
-    buf: dict[int, bytes] = {}
-    window = threads * WINDOW_MULT
+    lock = threading.Lock()
+    done = [0]
+    err = [""]
 
-    def reader():
+    def worker(t, b0, b1):
         try:
-            with open(src, "rb") as fh:
-                while True:
-                    with cond:
-                        if state["stop"] or state["next"] >= nseg:
-                            return
-                        if state["next"] - state["flushed"] >= window:
-                            cond.wait(1)
-                            continue
-                        idx = state["next"]
-                        state["next"] += 1
-                    start = idx * seg
-                    remain = size - start
-                    if remain <= 0:
-                        with cond:
-                            state["stop"] = True
-                            cond.notify_all()
+            with open(src, "rb") as fh:     # 每线程独立句柄
+                fh.seek(b0 * BLOCK)
+                for bi in range(b0, b1):
+                    if cancel is not None and cancel.is_set():
                         return
-                    fh.seek(start)
-                    data = fh.read(min(seg, remain))
-                    with cond:
-                        if data:
-                            buf[idx] = data
-                        else:
-                            state["stop"] = True
-                        cond.notify_all()
+                    off = bi * BLOCK
+                    data = fh.read(min(BLOCK, size - off))
                     if not data:
+                        with lock:
+                            err[0] = "提前 EOF @ %d" % off
                         return
+                    _pwrite(fd, data, off)
+                    with lock:
+                        done[0] += len(data)
         except Exception as exc:                                  # noqa: BLE001
-            with cond:
-                state["err"] = str(exc)
-                state["stop"] = True
-                cond.notify_all()
+            with lock:
+                err[0] = str(exc)
 
-    def writer():
-        try:
-            while True:
-                with cond:
-                    # stop 时若缓冲还有数据要写完再退，否则丢尾巴
-                    while not state["stop"] and not buf:
-                        cond.wait(1)
-                    if not buf:
-                        if state["stop"]:
-                            return
-                        continue
-                    idx = min(buf)
-                    data = buf.pop(idx)
-                    cond.notify_all()          # 立刻放行一个 reader
-                try:
-                    os.pwrite(fd, data, idx * seg)
-                except AttributeError:         # 仅非 Linux 测试环境
-                    os.lseek(fd, idx * seg, os.SEEK_SET)
-                    os.write(fd, data)
-                with cond:
-                    state["done"] += len(data)
-                    state["flushed"] += 1
-                    cond.notify_all()
-                    if state["done"] >= size:
-                        state["stop"] = True
-                        cond.notify_all()
-                        return
-        except Exception as exc:                                  # noqa: BLE001
-            with cond:
-                state["err"] = str(exc)
-                state["stop"] = True
-                cond.notify_all()
-
-    readers = [threading.Thread(target=reader, daemon=True) for _ in range(threads)]
-    writer_t = threading.Thread(target=writer, daemon=True)
-    for t in readers:
-        t.start()
-    writer_t.start()
+    ws = [threading.Thread(target=worker, args=s, daemon=True) for s in spans]
+    for w in ws:
+        w.start()
 
     last = -1
-    while writer_t.is_alive() or any(t.is_alive() for t in readers):
-        if cancel is not None and cancel.is_set():
-            with cond:
-                state["stop"] = True
-                cond.notify_all()
+    while any(w.is_alive() for w in ws):
         if progress_cb:
-            with cond:
-                done = state["done"]
-            if done != last:
-                progress_cb(done, size)
-                last = done
+            with lock:
+                d = done[0]
+            if d != last:
+                progress_cb(d, size)
+                last = d
         time.sleep(0.25)
-
-    for t in readers:
-        t.join()
-    writer_t.join()
+    for w in ws:
+        w.join()
     try:
         os.close(fd)
     except Exception:                                             # noqa: BLE001
         pass
-    with cond:
-        done, err = state["done"], state["err"]
-    if err:
-        return False, done, err
-    if done != size:
-        return False, done, "只写入 %s / %s" % (human(done), human(size))
-    return True, done, ""
+    with lock:
+        d, e = done[0], err[0]
+    if progress_cb:
+        progress_cb(d, size)
+    if cancel is not None and cancel.is_set():
+        return False, d, "已取消"
+    if e:
+        return False, d, e
+    if d != size:
+        return False, d, "只写入 %s / %s" % (human(d), human(size))
+    return True, d, ""
 
 
 def copy_tree(src, dst, engine: str = "fuse", progress_cb=None, cancel=None):
@@ -331,11 +308,14 @@ def copy_tree(src, dst, engine: str = "fuse", progress_cb=None, cancel=None):
         except Exception:                                         # noqa: BLE001
             pass
     dst.mkdir(parents=True, exist_ok=True)
+    _relax_dir(dst)                        # 让宿主上的 aria2(admin) 也能写入本目录
     done_files, done_bytes = 0, 0
     for f in files:
         if cancel is not None and cancel.is_set():
             return False, "已取消", done_files, done_bytes
         target = dst / f.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _relax_dir(target.parent)
         base = done_bytes
 
         def cb(done, total, _base=base, _df=done_files):
@@ -350,6 +330,20 @@ def copy_tree(src, dst, engine: str = "fuse", progress_cb=None, cancel=None):
         if progress_cb:
             progress_cb(done_bytes, total_bytes, done_files, total_files)
     return True, "", done_files, done_bytes
+
+
+def _relax_dir(path) -> None:
+    """把目录权限放宽到 0777。
+
+    动机：容器以 **root** 建目录（默认 0755），而 NAS 侧 aria2 以 **admin** 跑 ——
+    若后续有直链源要往这个目录里写，admin 会 `Permission denied`
+    （skill 里 `Failed to make the directory …, cause: Permission denied` 就是这个）。
+    挂载源走分段直读不经过 aria2，所以只影响直链源。
+    """
+    try:
+        os.chmod(str(path), 0o777)
+    except Exception:                                             # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------- aria2 通道
@@ -449,6 +443,7 @@ def aria2_purge(gid: str):
 def download_url(url: str, dest: str, threads: int = 8, progress_cb=None, cancel=None):
     """用 aria2 下载一个直链到 dest 目录。返回 (ok, path)。"""
     Path(dest).mkdir(parents=True, exist_ok=True)
+    _relax_dir(dest)                       # aria2 以 admin 跑，目录得让它能写
     gid = aria2_add_uri(url, dest, threads)
     while True:
         t = aria2_find(gid)
