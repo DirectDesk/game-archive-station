@@ -9,3 +9,9 @@ dist/
 # 补丁脚本临时备份
 *.bak
 *.bak_*
+
+# 内部运维文档与工作日志（不入公开仓库）
+PROJECT_HANDOVER.md
+context_summary_game-archive.md
+匹配优化4-7副作用分析.md
+.workbuddy/memory/

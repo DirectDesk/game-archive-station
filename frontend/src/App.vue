@@ -307,6 +307,81 @@ async function importGlossary() { try { await api('/api/glossary/batch',{method:
 
 function toggleTagPanel() { showTagPanel.value=!showTagPanel.value; localStorage.setItem('tag_panel_open',String(showTagPanel.value)) }
 let timer; onMounted(()=>{_loadRefreshTasks(); refreshTimer=setInterval(_pollRefreshTasks, 2000); showTagPanel.value=localStorage.getItem('tag_panel_open')==='true'; const saved=JSON.parse(localStorage.getItem('game-archive-transfer-task') || 'null'); if (saved && ['pending','running'].includes(saved.status)) { transferTask.value=saved; pollTransfer() }; load();loadTags();window.addEventListener('keydown',onPreviewKey);timer=setInterval(()=>{now.value=Date.now();load()},3000)}); onUnmounted(()=>{clearInterval(timer);clearInterval(refreshTimer);window.removeEventListener('keydown',onPreviewKey)})
+
+const showChangelog = ref(false)
+const changelog = [
+  { version: 'v1.7.1', title: '详情页与分页优化', items: [
+    '详情页游戏名独占一行，操作按钮行可换行，不再被长标题挤占',
+    '详情页容量左侧显示记录 ID（ID：x），便于排查',
+    '首页卡片改为分页：默认 18 个/页，可选 18 / 36 / 54',
+    '扫描附件过滤增加体积豁免；custom 记录补全 file_size',
+  ] },
+  { version: 'v1.7.0', title: '字段拆分与用户锁定', items: [
+    '游戏名拆分为 title（原文）/ title_cn（中文译名），展示中文优先，改名不再被原文覆盖',
+    '新增 locked_fields 用户锁定：手改的简介 / 标签 / 中文名不再被翻译与术语表流程静默覆盖',
+    '锁定按钮改为同行锁图标',
+    '修复 VNDB 截图抓取取错字段（把封面当截图）；匹配后自动刷新截图',
+    '匹配算法修复：VNDB 兜底纳入别名候选、序号词元归一（3 / 03 / III）、修衍生作保护误伤',
+    '补齐前端静态目录 icons/（pc / android / gal 图标 404）',
+  ] },
+  { version: 'v1.6.5', title: '封面与显示修复', items: [
+    '删除失效的 RAWG「按 steam_appid 过滤」接口（参数无效，恒返回默认第一条）',
+    '修复封面来源优先级在扫描 / 刷新流程中未生效',
+    '修复「显示原文」模式下游戏名 / 简介 / 标签输入框被原文值覆盖',
+    'Dockerfile 的 npm ci 改用 npmmirror 源，修复镜像构建失败',
+  ] },
+  { version: 'v1.6.4', title: '路径与平台', items: [
+    '修复孤立文件游戏详情页路径被截断',
+    'apk 自动判定为安卓平台',
+    'Dockerfile 增加 COPY backend/tools，让回归工具随镜像发布',
+  ] },
+  { version: 'v1.6.3', title: '译名保护', items: [
+    '保护用户译名不被回归流程覆盖',
+    '回归工具默认改为不全量执行',
+  ] },
+  { version: 'v1.6.2', title: '刷新与匹配', items: [
+    '刷新元数据改为全量重匹配',
+    '匹配算法深度修复；修复启动去重误删',
+    '修复扫描分包过滤失效；扫描提示文案实时化',
+  ] },
+  { version: 'v1.6.1', title: '错配根因', items: [
+    '修复错配根因：相似度算法 / 全角归一 / 来源择优',
+    '首页类型筛选改用 game_type；详情页类型同行显示',
+    '刷新改为后台轮询，耗时降低约 59%',
+  ] },
+  { version: 'v1.6.0', title: '平台类型与手动匹配', items: [
+    '新增游戏平台类型（pc / android / gal）+ 手动匹配元数据 + 重新翻译 + 翻译测试连接',
+    '新增 pc / android / gal 类型图标（128×128 徽章）+ 卡片三行布局',
+  ] },
+  { version: 'v1.5.0', title: '交互与匹配增强', items: [
+    '删除交互重构',
+    '谷歌翻译链路修复；术语表支持通用类型',
+    '详情页容量位置调整；匹配算法增强',
+  ] },
+  { version: 'v1.4.0', title: '术语表与翻译链路', items: [
+    '标签术语表抽成 JSON 后合并进数据库，支持分类筛选与翻页（10 / 20 / 50 / 100 条）',
+    '标签翻译：术语表优先 + 谷歌翻译兜底 + 自动学习；质量校验（截断 / 音译垃圾保留原文）',
+    '新增谷歌翻译预设（免费接口，带重试退避）',
+    '标签筛选页无限滚动（首次 25 条）；术语表未命中直接返回原文提速',
+    '刮削逻辑重构 + 翻译链路修复 + 数据源修复',
+    '修复增量扫描百度网盘目录不生效；release_date 序列化 / 类型转换',
+  ] },
+  { version: 'v1.3.0', title: '多数据源里程碑', items: [
+    '新增 DLsite 数据源客户端，扫描 / 详情 / 服务全链路支持',
+    'Steam 数据源集成（搜索 + appdetails 反查 + 封面 / 截图），扫描顺序 rawg → steam → vndb → dlsite',
+    '数据模型新增 source_ids / source_data：扫描存主来源数据、刷新多来源补充，封面 / 标签 / 截图优先取 source_data',
+    '详情页顶部数据源检测状态指示器（绿 ✓ / 红 ✕ / 刷新）',
+    '标签数据源优先级（设置页拖拽排序 + 详情页来源选择 + 后端 resolve_tags）',
+    '标签筛选按来源过滤；游戏包大小显示；版本号可编辑；设置页 2×2 布局',
+    '匹配修复：RAWG 阈值 60%→70%、过滤非主游戏、Steam 结果过滤 DLC / 艺术集 / 原声',
+  ] },
+  { version: 'v1.2.0', title: '多数据源起步', items: [
+    '多数据源（RAWG / VNDB）接入，封面来源可配置',
+    '截图懒加载；标签侧栏',
+    '一批问题修复：重复记录 / 原文切换 / Steam 封面 / 截图 / 刷新按钮 / 标签面板 / 游玩状态 / 搜索框',
+  ] },
+]
+
 </script>
 
   <template>
@@ -351,7 +426,7 @@ let timer; onMounted(()=>{_loadRefreshTasks(); refreshTimer=setInterval(_pollRef
 
 </section><section v-else-if="settingsTab==='glossary'"><div class="mb-3 flex gap-2"><input v-model="glossaryQ" placeholder="搜索原文" @input="loadGlossary"><select v-model="glossaryCategory" @change="loadGlossary"><option value="">全部分类</option><option value="general">通用</option><option value="tag">标签</option><option value="title">游戏名</option><option value="description">简介</option></select></div><div class="mb-3 grid gap-2 md:grid-cols-4"><input v-model="glossaryDraft.source_text" placeholder="原文"><input v-model="glossaryDraft.target_text" placeholder="译文"><select v-model="glossaryDraft.category"><option value="general">通用</option><option value="tag">标签</option><option value="title">游戏名</option><option value="description">简介</option></select><button class="btn" @click="saveGlossary">{{glossaryEditing?'保存':'新增'}}</button></div><div v-for="item in glossary" :key="item.id" class="flex items-center gap-2 border-b border-slate-700 py-2 text-sm"><span class="flex-1">{{item.source_text}}</span><span class="flex-1">{{item.target_text}}</span><span class="w-16 text-xs text-slate-400">{{item.category}}</span><button class="btn-muted" @click="Object.assign(glossaryDraft,item);glossaryEditing=item.id">编辑</button><button class="bg-red-700" @click="deleteGlossary(item.id)">删除</button></div>
 <div class="mt-3 flex items-center justify-between text-sm"><div class="flex items-center gap-2"><span>每页</span><select v-model="glossarySize" @change="glossaryPage=1;loadGlossary()" class="w-20"><option :value="10">10</option><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select><span>条</span></div><div class="flex items-center gap-2"><button class="btn-muted" :disabled="glossaryPage<=1" @click="glossaryPage--;loadGlossary()">上一页</button><span>{{glossaryPage}} / {{Math.ceil(glossaryTotal/glossarySize)||1}}</span><button class="btn-muted" :disabled="glossaryPage>=Math.ceil(glossaryTotal/glossarySize)" @click="glossaryPage++;loadGlossary()">下一页</button><span class="text-slate-400">共 {{glossaryTotal}} 条</span></div></div><textarea v-model="glossaryBatch" class="mt-4" rows="4" placeholder='批量导入 JSON：[{"source_text":"Action","target_text":"动作","category":"tag"}]'></textarea><button class="btn mt-2" @click="importGlossary">批量导入</button>
-</section><section v-else class="space-y-2 text-sm text-slate-300"><p>版本：1.7.0</p><p>技术栈：FastAPI · SQLAlchemy Async · SQLite · Vue 3</p><p>数据目录：/app/data/</p></section><div v-if="settingsTab==='scan'||settingsTab==='source'" class="mt-5"><button class="btn" @click="saveSettings">保存设置</button></div></section></div>
+</section><section v-else class="space-y-2 text-sm text-slate-300"><p>版本：1.7.1</p><p>技术栈：FastAPI · SQLAlchemy Async · SQLite · Vue 3</p><p>数据目录：/app/data/</p><div class="pt-1"><button class="btn-muted" @click="showChangelog=!showChangelog">{{ showChangelog ? '收起更新日志' : '查看更新日志（v1.2.0 至今）' }}</button></div><div v-if="showChangelog" class="space-y-4 rounded-md border border-slate-700 bg-slate-900/50 p-4"><div v-for="v in changelog" :key="v.version"><p class="font-semibold text-slate-100">{{ v.version }}<span v-if="v.title" class="ml-2 text-xs font-normal text-slate-400">{{ v.title }}</span></p><ul class="mt-1 list-disc space-y-0.5 pl-5 text-slate-400"><li v-for="(item, idx) in v.items" :key="idx">{{ item }}</li></ul></div></div></section><div v-if="settingsTab==='scan'||settingsTab==='source'" class="mt-5"><button class="btn" @click="saveSettings">保存设置</button></div></section></div>
     <div v-if="showMatch" class="fixed inset-0 z-20 overflow-y-auto bg-black/70 p-4" @click.self="showMatch=false"><section class="mx-auto my-4 max-w-3xl rounded-xl bg-panel p-5 md:my-10">
   <div class="mb-4 flex items-center justify-between"><h2 class="text-xl font-bold">手动匹配元数据</h2><button class="btn-muted" @click="showMatch=false">关闭</button></div>
   <p class="mb-4 text-sm text-slate-400">根据当前游戏名在 Steam / RAWG / VNDB / DLsite 搜索，按相似度排序。选择一项即应用其全部元数据（封面、简介、标签等），并将该来源设为主来源。</p>

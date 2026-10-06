@@ -21,7 +21,8 @@ services:
       - SCAN_CRON=0 3 * * *
       - SCAN_THROTTLE_MS=50
       - SCAN_WEEKLY_FULL_CHECK=false
-      - RAWG_API_KEY=***REMOVED-RAWG-API-KEY***
+      # RAWG API Key 从同目录 .env 读取（.env 不入库；见 .env.example）
+      - RAWG_API_KEY=${RAWG_API_KEY:-}
     volumes:
       # 修改左侧为飞牛本地存储中的实际目录。
       - /vol1/1000/docker/game-archive/data:/app/data
