@@ -186,6 +186,32 @@ def display_title(game: "Game") -> str:
     return (game.title or "").strip()
 
 
+# 允许用户锁定的字段。锁定后，自动流程（刮削刷新 / 手动匹配 / 重新翻译 /
+# 术语表同步）一律跳过这些字段，保护用户手改的内容不被静默覆盖。
+LOCKABLE_FIELDS = ("title_cn", "tags", "description")
+
+
+def locked_fields_set(game: "Game") -> set[str]:
+    """读取 game.locked_fields（JSON 数组字符串），返回已锁定的字段名集合。"""
+    if game is None:
+        return set()
+    raw = getattr(game, "locked_fields", "") or ""
+    if not raw:
+        return set()
+    try:
+        val = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(val, list):
+        return set()
+    return {str(x) for x in val if str(x) in LOCKABLE_FIELDS}
+
+
+def is_locked(game: "Game", field: str) -> bool:
+    """该字段是否被用户锁定（锁定后不参与自动翻译 / 术语同步 / 刮削覆盖）。"""
+    return field in locked_fields_set(game)
+
+
 async def resolve_tags(game: Game, config: SystemConfig, requested_source: str = "", db: AsyncSession = None) -> str:
     """按配置优先级从 original_data 中选择标签；返回选中的标签字符串。"""
     try:
@@ -236,7 +262,9 @@ async def resolve_tags(game: Game, config: SystemConfig, requested_source: str =
                     translated_tags = ", ".join(translated_parts)
                 except Exception as e:
                     logger.warning("标签翻译失败 game_id=%s: %s", game.id, e)
-            game.tags = translated_tags
+            # tags 被用户锁定时不覆盖（原文仍写入 source_data 供追溯）
+            if not is_locked(game, "tags"):
+                game.tags = translated_tags
             game.tag_source = source
             logger.info("标签解析：game_id=%s, source=%s, 原文=%.60s, 译文=%.60s", game.id, source, tags[:60], translated_tags[:60])
             return translated_tags
@@ -1030,20 +1058,6 @@ def normalize_release_date(value):
             return None
     return None
 
-async def _keep_user_title_default(db: AsyncSession) -> bool:
-    """返回是否启用「保留用户译名」。读 SystemConfig.keep_user_title，
-    字段不存在或无配置时默认 True（保护优先）。"""
-    try:
-        from .models import SystemConfig
-        cfg = await db.get(SystemConfig, 1)
-        if cfg is None:
-            return True
-        val = getattr(cfg, "keep_user_title", True)
-        return True if val is None else bool(val)
-    except Exception:
-        return True
-
-
 async def retag_games_from_glossary(db: AsyncSession, apply_title: bool | None = None) -> int:
     """术语表变更后，把最新的 tag 映射重新应用到所有游戏已持久化的标签上。
 
@@ -1123,9 +1137,10 @@ async def retag_games_from_glossary(db: AsyncSession, apply_title: bool | None =
             # 数量对不上：只能对现有译文正向查表（覆盖术语表修正/中英互改）
             new_parts = [lookup(cur) or cur for cur in cur_parts]
         new_tags = ", ".join(new_parts)
-        changed = new_tags != current_tags
-        if changed:
+        changed = False
+        if new_tags != current_tags and not is_locked(game, "tags"):
             game.tags = new_tags
+            changed = True
         # title 类 + general 术语同步到**中文译名 title_cn**。
         #
         # v1.7.0 语义变更：title 现在是「原始名」，不再被翻译覆盖，
@@ -1136,17 +1151,18 @@ async def retag_games_from_glossary(db: AsyncSession, apply_title: bool | None =
         _apply_title_enabled = apply_title
         if _apply_title_enabled is None:
             _apply_title_enabled = True
-        if _apply_title_enabled:
+        if _apply_title_enabled and not is_locked(game, "title_cn"):
             # 以「原始名」为源做术语映射，结果落到 title_cn
             _src_for_cn = (game.title_cn or "") or (game.title or "")
             new_cn = _apply_general(_apply_title(_src_for_cn))
             if new_cn != (game.title_cn or ""):
                 game.title_cn = new_cn
                 changed = True
-        new_desc = _apply_general(game.description or "")
-        if new_desc != (game.description or ""):
-            game.description = new_desc
-            changed = True
+        if not is_locked(game, "description"):
+            new_desc = _apply_general(game.description or "")
+            if new_desc != (game.description or ""):
+                game.description = new_desc
+                changed = True
         if changed:
             updated += 1
     if updated:
@@ -1592,7 +1608,7 @@ async def refresh_game_metadata(game_id: int) -> None:
         # 注意：不覆盖 game.title（保留用户/扫描命名，如"尾行3 中文版"）；
         # 数据源标题存放在 source_data[src]["title"] 中，界面需要时从此取用。
         for field in ("alias", "description", "developer", "publisher", "release_date", "rating", "tags", "series", "source_type", "source_id", "screenshots", "version", "original_data", "steam_appid"):
-            if field in metadata:
+            if field in metadata and not is_locked(game, field):
                 setattr(game, field, metadata[field])
         # 封面按 cover_source_priority 选取（而非直接跟随主来源）
         _cfg = await session.get(SystemConfig, 1)
@@ -2097,9 +2113,9 @@ async def apply_match(game_id: int, source_type: str, source_id: str, set_primar
             for field in ("title", "alias", "description", "developer", "publisher",
                           "release_date", "rating", "tags", "series", "source_type",
                           "source_id", "screenshots", "version", "original_data", "steam_appid"):
-                if field in metadata:
+                if field in metadata and not is_locked(game, field):
                     setattr(game, field, metadata[field])
-            if metadata.get("title_cn"):
+            if metadata.get("title_cn") and not is_locked(game, "title_cn"):
                 game.title_cn = metadata["title_cn"]
             game.source_type = source_type
             game.source_id = source_id
@@ -2171,8 +2187,11 @@ async def retranslate_game(game_id: int, force: bool = False, keep_title: bool |
         _keep = keep_title
         if _keep is None:
             _keep = False  # False = 允许写入 title_cn
+        _skipped: list[str] = []  # 因用户锁定而跳过的字段
         src_title = original.get("title") or game.title or ""
-        if src_title and not _keep:
+        if is_locked(game, "title_cn"):
+            _skipped.append("title_cn")
+        elif src_title and not _keep:
             new_cn = await translation_service.translate(src_title, "title", session)
             # 只在译出「不同的中文名」时写入
             if (new_cn and new_cn != src_title
@@ -2180,34 +2199,41 @@ async def retranslate_game(game_id: int, force: bool = False, keep_title: bool |
                     and any("\u4e00" <= c <= "\u9fff" for c in new_cn)):
                 game.title_cn = new_cn
                 changed = True
-        # 重新翻译简介
-        src_desc = original.get("description") or ""
-        if src_desc:
-            new_desc = await translation_service.translate(src_desc, "description", session)
-            if new_desc and new_desc != game.description:
-                game.description = new_desc
-                changed = True
-        # 重新翻译标签（按当前标签来源的原文）
-        tag_src = game.tag_source or game.source_type
-        raw_tags = ""
-        if isinstance(source_data.get(tag_src), dict):
-            raw_tags = source_data[tag_src].get("tags", "")
-        if not raw_tags:
-            raw_tags = original.get("tags", "")
-        if raw_tags:
-            parts = [p.strip() for p in raw_tags.split(",") if p.strip()]
-            translated = []
-            for p in parts:
-                translated.append(await translation_service.translate(p, "tag", session))
-            new_tags = ", ".join(translated)
-            if new_tags != game.tags:
-                game.tags = new_tags
-                changed = True
+        # 重新翻译简介（被用户锁定时跳过）
+        if is_locked(game, "description"):
+            _skipped.append("description")
+        else:
+            src_desc = original.get("description") or ""
+            if src_desc:
+                new_desc = await translation_service.translate(src_desc, "description", session)
+                if new_desc and new_desc != game.description:
+                    game.description = new_desc
+                    changed = True
+        # 重新翻译标签（按当前标签来源的原文）；被用户锁定时跳过
+        if is_locked(game, "tags"):
+            _skipped.append("tags")
+        else:
+            tag_src = game.tag_source or game.source_type
+            raw_tags = ""
+            if isinstance(source_data.get(tag_src), dict):
+                raw_tags = source_data[tag_src].get("tags", "")
+            if not raw_tags:
+                raw_tags = original.get("tags", "")
+            if raw_tags:
+                parts = [p.strip() for p in raw_tags.split(",") if p.strip()]
+                translated = []
+                for p in parts:
+                    translated.append(await translation_service.translate(p, "tag", session))
+                new_tags = ", ".join(translated)
+                if new_tags != game.tags:
+                    game.tags = new_tags
+                    changed = True
 
         game.game_type = game_type_str(game, source_data)
         await session.commit()
         return {"id": game.id, "changed": changed,
-                "title": game.title, "title_cn": game.title_cn}
+                "title": game.title, "title_cn": game.title_cn,
+                "skipped_locked": _skipped}
 
 
 async def recompute_all_game_types() -> int:
@@ -2253,9 +2279,9 @@ async def refresh_vndb_game_metadata(game_id: int) -> None:
             "rating", "tags", "series", "source_type", "source_id", "screenshots", "version",
             "original_data",
         ):
-            if field in metadata:
+            if field in metadata and not is_locked(game, field):
                 setattr(game, field, metadata[field])
-        if metadata.get("title_cn"):
+        if metadata.get("title_cn") and not is_locked(game, "title_cn"):
             game.title_cn = metadata["title_cn"]
         game.cover_url = metadata.get("cover_url", "")
         await session.commit()
@@ -2289,9 +2315,9 @@ async def refresh_rawg_game_metadata(game_id: int) -> None:
             "rating", "tags", "series", "source_type", "source_id", "screenshots", "version", "original_data",
             "steam_appid",
         ):
-            if field in metadata:
+            if field in metadata and not is_locked(game, field):
                 setattr(game, field, metadata[field])
-        if metadata.get("title_cn"):
+        if metadata.get("title_cn") and not is_locked(game, "title_cn"):
             game.title_cn = metadata["title_cn"]
         # 先保存远程 URL；封面 CDN 临时失败不应使元数据刷新失败。
         game.cover_url = metadata["cover_url"]

@@ -36,6 +36,11 @@ class Game(Base):
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     tags: Mapped[str] = mapped_column(String(1000), default="")
     tag_source: Mapped[str] = mapped_column(String(50), default="")
+    # 用户锁定的字段名（JSON 数组，如 ["description","tags"]）。
+    # 锁定后，所有「从数据源 / 翻译流程重新生成」的操作（刮削刷新、手动匹配、
+    # 重新翻译、术语表同步）都会跳过这些字段，保护用户手改的内容不被静默覆盖。
+    # 可锁字段见 services.LOCKABLE_FIELDS：title_cn / tags / description。
+    locked_fields: Mapped[str] = mapped_column(String(500), default="")
     series: Mapped[str] = mapped_column(String(255), default="")
     version: Mapped[str] = mapped_column(String(100), default="")
     source_type: Mapped[str] = mapped_column(String(20), default="custom")

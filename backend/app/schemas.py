@@ -23,6 +23,8 @@ class GameBase(BaseModel):
     rating: float | None = Field(default=None, ge=0, le=100, multiple_of=0.1)
     tags: str = ""
     tag_source: str = ""
+    # 用户锁定的字段名（JSON 数组字符串）；锁定后自动流程不再改写这些字段
+    locked_fields: str = ""
     series: str = ""
     version: str = ""
     source_type: str = "custom"
