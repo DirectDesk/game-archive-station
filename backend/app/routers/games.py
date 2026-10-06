@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 
 
 @router.get("", response_model=list[GameOut])
-async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_type: str = "", play_status: str = "", tag: str = "", game_type: str = "", sort: str = "updated", original: bool = False):
+async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_type: str = "", play_status: str = "", tag: str = "", tag_source: str = "", game_type: str = "", sort: str = "updated", original: bool = False):
     query = select(Game)
     if q:
         term = f"%{q}%"
@@ -43,22 +43,38 @@ async def list_games(db: AsyncSession = Depends(get_db), q: str = "", source_typ
     # 历史上的 ilike('%单人%') 会连「单人游戏」一起命中（实测「单人」应 6 款却筛出 11 款、
     # 「萝莉」把「小胸女主角（非萝莉）」也算进去）。这里去掉空格后用逗号包裹再 LIKE，
     # 只有「整个标签相等」才算命中。
-    if tags and not original:
+    if tags and not original and (not tag_source or tag_source == "all"):
         _norm = func.replace(Game.tags, " ", "")
         _padded = literal(",") + _norm + literal(",")
         query = query.where(or_(*(_padded.like(f"%,{value.replace(' ', '')},%") for value in tags)))
     query = query.order_by(desc(Game.rating) if sort == "rating" else desc(Game.created_at) if sort == "created" else desc(Game.updated_at))
     rows = list((await db.scalars(query)).all())
-    # 原文模式：筛选面板给的是「来源原文标签」（英文/日文），而 Game.tags 存的是译文，
-    # 只比 Game.tags 会一条都筛不到。这里在 Python 侧（数据量小）同时比对
-    # original_data / source_data 里的原文标签。
-    if tags and original:
-        rows = [game for game in rows if any(value in _all_tags_of(game) for value in tags)]
+    # 标签筛选分两种口径，必须与 /api/games/all-tags 面板保持一致：
+    #  · 面板「所有来源」(tag_source 空/all)：
+    #      译文模式 → 打 Game.tags（统一译名，已在上面的 SQL 里精确匹配）；
+    #      原文模式 → 在 Python 侧比对 original_data / source_data 里的各来源原文标签。
+    #  · 面板选定某来源 (tag_source=rawg/steam/...)：面板列的是「该来源的标签」，
+    #      而 Game.tags 只存该游戏主标签源的标签，两者不同源 →
+    #      必须按该来源的「显示标签集合」匹配，否则会出现"面板列了却一条都筛不到"。
+    if tags and (not tag_source or tag_source == "all"):
+        if original:
+            rows = [game for game in rows if any(value in _raw_tags_of(game) for value in tags)]
+    elif tags:
+        _local_glossary = await _load_tag_glossary(db)
+        _keep = []
+        for game in rows:
+            _disp = await _display_tags_of(game, tag_source, original, db, _local_glossary)
+            if any(value in _disp for value in tags):
+                _keep.append(game)
+        rows = _keep
     return rows
 
 
-def _all_tags_of(game: Game) -> set[str]:
-    """游戏身上的全部标签：译文串 + original_data / source_data 里的各来源原文串。"""
+def _raw_tags_of(game: Game) -> set[str]:
+    """游戏的**原文**标签集合：各来源 source_data[*].tags + original_data.tags（不含 Game.tags 译文）。
+
+    这是「显示原文」模式下标签面板与筛选共用的唯一口径。
+    """
     result: set[str] = set()
 
     def _collect(value):
@@ -67,7 +83,6 @@ def _all_tags_of(game: Game) -> set[str]:
         elif isinstance(value, list):
             result.update(str(part).strip() for part in value if str(part).strip())
 
-    _collect(game.tags)
     for blob in (game.original_data, game.source_data):
         try:
             data = json.loads(blob or "{}")
@@ -82,63 +97,68 @@ def _all_tags_of(game: Game) -> set[str]:
     return result
 
 
+def _all_tags_of(game: Game) -> set[str]:
+    """游戏身上的全部标签：译文串 + 各来源原文串（含译文，保留给历史调用）。"""
+    result = _raw_tags_of(game)
+    result.update(part.strip() for part in str(game.tags or "").split(",") if part.strip())
+    return result
+
+
+async def _load_tag_glossary(db) -> dict:
+    """术语表 source_text -> target_text（仅 category='tag'），与 /all-tags 面板同源。"""
+    from sqlalchemy import select as _select
+    from ..models import TranslationGlossary as _TG
+    result: dict = {}
+    async for _item in await db.stream_scalars(_select(_TG).where(_TG.category == "tag")):
+        result[_item.source_text] = _item.target_text
+    return result
+
+
+async def _panel_tag_display(tag: str, db, local_glossary: dict) -> str:
+    """单个标签的「面板显示值」，与 /all-tags 单来源译文模式完全一致。
+
+    已是中文（且无假名）的标签优先查术语表修正，否则用翻译服务（术语表优先 + 谷歌兜底）。
+    """
+    from ..translation_service import translation_service as _ts
+    if not _ts.glossary:
+        await _ts.load(db)
+    _chinese_count = sum(1 for _ch in tag if "\u4e00" <= _ch <= "\u9fff")
+    _has_kana = any("\u3040" <= _ch <= "\u309f" or "\u30a0" <= _ch <= "\u30ff" for _ch in tag)
+    if not _has_kana and len(tag) and _chinese_count / len(tag) > 0.3:
+        return local_glossary.get(tag, tag)
+    return await _ts.translate(tag, "tag", db)
+
+
+async def _display_tags_of(game: Game, source: str, original: bool, db, local_glossary: dict) -> set:
+    """某游戏在指定来源下、按面板口径会显示的标签集合（供单来源标签筛选使用）。"""
+    if source == "all":
+        return _raw_tags_of(game) if original else {t.strip() for t in str(game.tags or "").split(",") if t.strip()}
+    try:
+        data = json.loads(game.source_data or "{}")
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        return set()
+    block = data.get(source, {})
+    if not isinstance(block, dict):
+        return set()
+    raw = {t.strip() for t in str(block.get("tags", "")).split(",") if t.strip()}
+    if original:
+        return raw
+    return {await _panel_tag_display(t, db, local_glossary) for t in raw}
+
+
 @router.get("/all-tags")
 async def all_tags(source: str = "all", original: bool = False, page: int = 1, size: int = 25, db: AsyncSession = Depends(get_db)):
-    import json as _json
     counts: dict[str, int] = {}
-    # 一次性加载术语表到本地字典（避免全局单例状态不一致）
-    from ..models import TranslationGlossary as _TG
-    from sqlalchemy import select as _select
-    _local_glossary: dict[str, str] = {}
-    async for _item in await db.stream_scalars(_select(_TG).where(_TG.category == "tag")):
-        _local_glossary[_item.source_text] = _item.target_text
-
-    # source != all 时，从 source_data 按来源筛选
-    if source != "all":
-        for sd in await db.scalars(select(Game.source_data).where(Game.source_data != "{}")):
-            try:
-                data = _json.loads(sd)
-            except Exception:
-                continue
-            src_data = data.get(source, {}) if isinstance(data.get(source), dict) else {}
-            tags_str = src_data.get("tags", "")
-            for tag in {item.strip() for item in tags_str.split(",") if item.strip()}:
-                if original:
-                    # 原文模式：直接返回原文标签
-                    counts[tag] = counts.get(tag, 0) + 1
-                else:
-                    # 译文模式：用术语表翻译
-                    from ..translation_service import translation_service as _ts
-                    # 确保 glossary 已加载到内存
-                    if not _ts.glossary:
-                        await _ts.load(db)
-                    # 已是中文的标签先查术语表（可能有修正），没有才直接使用，跳过翻译提速
-                    _chinese_count = sum(1 for _ch in tag if "\u4e00" <= _ch <= "\u9fff")
-                    _has_kana = any("\u3040" <= _ch <= "\u309f" or "\u30a0" <= _ch <= "\u30ff" for _ch in tag)
-                    if not _has_kana and _chinese_count / len(tag) > 0.3:
-                        # 中文标签：先查术语表（可能有修正），没有才直接用原文
-                        translated = _local_glossary.get(tag, tag)
-                    else:
-                        # 非中文标签：用翻译服务（术语表优先+谷歌兜底）
-                        translated = await _ts.translate(tag, "tag", db)
-                    counts[translated] = counts.get(translated, 0) + 1
-    elif original:
-        # source=all + 原文模式：从所有来源聚合原文标签
-        sources = ["rawg", "steam", "vndb", "dlsite"]
-        for sd in await db.scalars(select(Game.source_data).where(Game.source_data != "{}")):
-            try:
-                data = _json.loads(sd)
-            except Exception:
-                continue
-            for src in sources:
-                tags_str = data.get(src, {}).get("tags", "") if isinstance(data.get(src), dict) else ""
-                for tag in {item.strip() for item in tags_str.split(",") if item.strip()}:
-                    counts[tag] = counts.get(tag, 0) + 1
-    else:
-        # source=all + 译文模式：从 Game.tags 聚合（当前逻辑）
-        for value in await db.scalars(select(Game.tags).where(Game.tags != "")):
-            for tag in {item.strip() for item in value.split(",") if item.strip()}:
-                counts[tag] = counts.get(tag, 0) + 1
+    # 术语表一次性加载，供 _display_tags_of 复用
+    _local_glossary: dict[str, str] = await _load_tag_glossary(db)
+    # 统一按「游戏 → 该游戏显示的标签集合」聚合：同一游戏对同一显示标签**只计一次**。
+    # 这样面板 count 恰好等于点该标签筛出的游戏数（与 list_games 同口径），
+    # 避免「同游戏多来源同名词 / 多原文标签译成同一中文」被重复计数。
+    for game in await db.scalars(select(Game)):
+        for tag in await _display_tags_of(game, source, original, db, _local_glossary):
+            counts[tag] = counts.get(tag, 0) + 1
 
     all_items = [{"tag": tag, "count": count} for tag, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
     total = len(all_items)
