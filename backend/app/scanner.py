@@ -39,6 +39,12 @@ class LibraryScanner:
     """
 
     # 忽略的文件类型（文本/图片/字幕/校验文件等，不算游戏）
+    # 附件体积上限：超过此体积的文件，即便命中非游戏关键词（补丁/汉化/修改器
+    # /存档等）也视为「集成了汉化/补丁的完整游戏」，不再忽略。
+    # 背景：'希尔薇TeachingFeeling-v3.0.22-集成汉化补丁.zip'(1.8GB) 曾因
+    # 名字含「汉化/补丁」被误判为附件而整条不扫描（附件不会这么大）。
+    _ATTACHMENT_MAX_BYTES = 200 * 1024 * 1024
+
     _IGNORE_EXTS = {
         ".txt", ".md", ".doc", ".docx", ".nfo", ".pdf", ".rtf", ".odt",
         ".srt", ".ass", ".ssa", ".vtt", ".url", ".htm", ".html",
@@ -82,15 +88,25 @@ class LibraryScanner:
         return stem.lower()
 
     @classmethod
-    def _is_ignored_file(cls, filename: str) -> bool:
-        """文本/图片等非游戏文件，或补丁/修改器等附件文件。"""
+    def _is_ignored_file(cls, filename: str, size: int | None = None) -> bool:
+        """文本/图片等非游戏文件，或补丁/修改器等附件文件。
+
+        size 给定时启用「体积豁免」：附件（补丁/汉化/修改器/存档等）不会很大，
+        因此命中非游戏关键词但体积 >= _ATTACHMENT_MAX_BYTES 的文件视为
+        「集成了汉化/补丁的完整游戏」，不再忽略。
+        """
         lower = filename.lower()
         ext = ("." + lower.rsplit(".", 1)[1]) if "." in lower else ""
         # 分包后缀的文件扩展名（.001/.r00）不在忽略表内，先判断扩展名
         if ext in cls._IGNORE_EXTS:
             return True
         stem = lower.rsplit(".", 1)[0]
-        return any(keyword in stem for keyword in cls._NON_GAME_KEYWORDS)
+        if not any(keyword in stem for keyword in cls._NON_GAME_KEYWORDS):
+            return False
+        # 体积豁免：大文件是游戏本体，而非附件
+        if size is not None and size >= cls._ATTACHMENT_MAX_BYTES:
+            return False
+        return True
 
     # 数据分包/附属文件后缀：与同目录主程序（apk/exe 等）合并为同一游戏单元
     _DATA_SIDECAR_EXTS = {".obb", ".bin", ".dat", ".pak", ".arc"}
@@ -209,7 +225,7 @@ class LibraryScanner:
     async def _analyze_folder(cls, path: Path) -> list:
         """分析文件夹内的游戏单元：过滤非游戏文件、压缩包分包合并后按单元分组。"""
         all_files = await cls._list_files_recursive(path)
-        valid = [(fp, size) for fp, size in all_files if not cls._is_ignored_file(fp.name)]
+        valid = [(fp, size) for fp, size in all_files if not cls._is_ignored_file(fp.name, size)]
         if not valid:
             return []
         return cls._merge_data_sidecars(cls._group_files(valid))
@@ -568,6 +584,22 @@ class LibraryScanner:
                     candidates = [dlsite_results[0]]
                     source_type = "dlsite"
                     logger.info("DLsite fallback 匹配成功：%s -> %s (%s)", folder.name, dlsite_results[0].get("title",""), dlsite_results[0].get("source_id",""))
+            # 资源大小：优先用扫描已知的单元大小，否则回退到实际文件/目录。
+            # 提前算好，供 custom（未匹配）与匹配成功两条分支共用。
+            _size = known_size or 0
+            if not _size:
+                try:
+                    if os.path.isfile(folder_path):
+                        _size = os.path.getsize(folder_path)
+                    else:
+                        for _root_s, _dirs_s, _files_s in os.walk(folder_path):
+                            for _f_s in _files_s:
+                                try:
+                                    _size += os.path.getsize(os.path.join(_root_s, _f_s))
+                                except OSError:
+                                    pass
+                except Exception:
+                    pass
             if not candidates:
                 game = Game(
                     title=raw_name,
@@ -577,6 +609,7 @@ class LibraryScanner:
                     source_id="",
                     resource_type=resource_type,
                     resource_url=folder_path,
+                    file_size=_size,
                     play_status="favorite",
                 )
                 db.add(game)
@@ -636,19 +669,8 @@ class LibraryScanner:
                 _sids["steam"] = metadata["steam_appid"]
             metadata["source_data"] = json.dumps(_sd, ensure_ascii=False)
             metadata["source_ids"] = json.dumps(_sids, ensure_ascii=False)
-            # 计算资源大小（文件夹递归 / 单文件 / 已知的单元合计）
-            _dir_size = known_size or 0
-            if not _dir_size:
-                try:
-                    if os.path.isfile(folder_path):
-                        _dir_size = os.path.getsize(folder_path)
-                    else:
-                        for _root, _dirs, _files in os.walk(folder_path):
-                            for _f in _files:
-                                try: _dir_size += os.path.getsize(os.path.join(_root, _f))
-                                except OSError: pass
-                except Exception:
-                    pass
+            # 资源大小（复用上方已算好的 _size）
+            _dir_size = _size
             metadata.update({"resource_type": resource_type, "resource_url": folder_path, "play_status": "favorite", "file_size": _dir_size})
             # 过滤掉 Game 模型不存在的字段（如 steam 的 english_name 等），避免创建时报错
             _valid_fields = {column.name for column in Game.__table__.columns}
@@ -694,7 +716,7 @@ class LibraryScanner:
                 task["logs"] = (task["logs"] + [f"已读取：{root}"])[-20:]
 
                 # 根目录下的直接文件：过滤后按单元分组（分包合并），每个单元一个游戏
-                file_units = self._group_files([(fp, size) for fp, size in files if not self._is_ignored_file(fp.name)])
+                file_units = self._group_files([(fp, size) for fp, size in files if not self._is_ignored_file(fp.name, size)])
                 for unit_name, unit_path, unit_size in file_units:
                     if await self._create_game_from_folder(unit_path, resource_type, config, search_name=unit_name, known_size=unit_size):
                         task["discovered_games"] += 1
