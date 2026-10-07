@@ -15,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import settings
 from ..database import SessionLocal, get_db
 from ..download_engine import (copy_path, iter_file_parallel, iter_file_range,
-                                pick_engine, threads_for, zip_stored_size)
+                                iter_tar, pick_engine, tar_layout, threads_for,
+                                zip_stored_size)
 from ..models import AsyncTask, Game, SystemConfig
 from ..task_manager import task_manager
 
@@ -131,6 +132,41 @@ def _download_headers(path: Path, filename: str) -> dict:
     return {"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
 
 
+def _stream_file(path: Path, request: Request, threads: int, filename: str):
+    """带 Range 的文件流式响应（挂载源）。
+
+    - 整文件请求（无 Range）→ `iter_file_parallel` 多线程并发读；
+    - Range 请求 → `iter_file_range` **单线程顺序读**（并行度交给客户端的多条连接，
+      避免「连接数 × 内部线程数」超额订阅）。
+    """
+    size = path.stat().st_size
+    headers = _download_headers(path, quote(filename))
+    headers["Accept-Ranges"] = "bytes"
+    rng = _parse_range(request.headers.get("range"), size)
+    if rng is None:
+        start, end, status = 0, size - 1, 200
+        body = iter_file_parallel(path, threads, start, size)
+    else:
+        start, end = rng
+        status = 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        body = iter_file_range(path, start, end - start + 1)
+    headers["Content-Length"] = str(end - start + 1)
+    return StreamingResponse(body, status_code=status,
+                             media_type="application/octet-stream", headers=headers)
+
+
+def _single_file_in(directory: Path):
+    """目录里**只有一个文件**时返回它，否则 None。
+
+    游戏目录很常见：一个压缩包 + 0~2 个说明小文件。此时**直接下发那个文件**
+    （带 Range）远好于套一层 zip：没有 zip 开销、客户端可多连接下载、文件名也正确。
+    ⚠️ 需要遍历目录（只读元数据）；`zip_stored_size` 本来也要遍历，成本相当。
+    """
+    files = [p for p in directory.rglob("*") if p.is_file()]
+    return files[0] if len(files) == 1 else None
+
+
 @router.get("/games/{game_id}/download-to-pc")
 async def download_to_pc(game_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     game = await db.get(Game, game_id)
@@ -141,43 +177,49 @@ async def download_to_pc(game_id: int, request: Request, db: AsyncSession = Depe
     path = _safe_path(game)
     engine = pick_engine(game.resource_type, path)
     threads = threads_for(engine)
-    if path.is_file():
-        size = path.stat().st_size
-        headers = _download_headers(path, quote(path.name))
-        headers["Accept-Ranges"] = "bytes"
+    inner = path if path.is_file() else _single_file_in(path)
+    if inner is not None:
         if engine == "fuse" and threads > 1:
-            # 挂载源：分段并发读 → 流式响应；**支持 Range**，让 IDM 等外部下载器
-            # 开多条连接并行（每条连接内部仍多线程读，实测能跑满）。
-            rng = _parse_range(request.headers.get("range"), size)
-            if rng is None:
-                start, end, status = 0, size - 1, 200
-                body = iter_file_parallel(path, threads, start, end - start + 1)
-            else:
-                start, end = rng
-                status = 206
-                headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-                # Range 走**单线程顺序读**：并行度交给客户端的多条连接，
-                # 避免「连接数 × 内部线程数」超额订阅（实测 8 连接反而更慢）。
-                body = iter_file_range(path, start, end - start + 1)
-            headers["Content-Length"] = str(end - start + 1)
-            return StreamingResponse(
-                body, status_code=status, media_type="application/octet-stream", headers=headers)
+            return _stream_file(inner, request, threads, inner.name)
         # 本地磁盘：FileResponse 原生支持 Range + Content-Length
-        return FileResponse(path, filename=path.name,
+        headers = _download_headers(inner, quote(inner.name))
+        headers["Accept-Ranges"] = "bytes"
+        return FileResponse(inner, filename=inner.name,
                             media_type="application/octet-stream", headers=headers)
-    # 目录：STORED 流式 zip；预计算大小 → 客户端能显示下载进度
-    filename = quote(f"{path.name}.zip")
-    headers = _download_headers(path, filename)
-    headers["Accept-Ranges"] = "none"
-    zsize = zip_stored_size(path)
-    if zsize:
-        headers["Content-Length"] = str(zsize)
-    return StreamingResponse(_zip_stream(path, threads), media_type="application/zip",
-                             headers=headers)
+    # 目录（含多个文件）：默认 **tar**。tar 无 CRC → 大小/偏移可精确预计算 →
+    # **支持 HTTP Range → IDM 等客户端可多连接下载**（实测 4 连接 21.9MB/s
+    # vs 单连接 5.7MB/s）。zip 需要 CRC，只能 `Accept-Ranges: none` 单连接，
+    # 且顺序消费下多线程读会被「当前区间」卡住（实测仅 ~6-10MB/s）。
+    # 需要 zip 时加 `?fmt=zip`（STORED 不压缩，带精确 Content-Length）。
+    if request.query_params.get("fmt") == "zip":
+        filename = quote(f"{path.name}.zip")
+        headers = _download_headers(path, filename)
+        headers["Accept-Ranges"] = "none"
+        zsize = zip_stored_size(path)
+        if zsize:
+            headers["Content-Length"] = str(zsize)
+        return StreamingResponse(_zip_stream(path, threads), media_type="application/zip",
+                                 headers=headers)
+    segs, total = tar_layout(path)
+    if not segs:
+        raise HTTPException(500, "目录为空或不可读")
+    headers = _download_headers(path, quote(f"{path.name}.tar"))
+    headers["Accept-Ranges"] = "bytes"
+    rng = _parse_range(request.headers.get("range"), total)
+    if rng is None:
+        start, end, status = 0, total - 1, 200
+    else:
+        start, end = rng
+        status = 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    headers["Content-Length"] = str(end - start + 1)
+    return StreamingResponse(
+        iter_tar(path, start, end - start + 1, threads if rng is None else 1, segs, total),
+        status_code=status, media_type="application/x-tar", headers=headers)
 
 
 @router.head("/games/{game_id}/download-to-pc")
-async def download_to_pc_head(game_id: int, db: AsyncSession = Depends(get_db)):
+async def download_to_pc_head(game_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """HEAD 探测：让 IDM 等外部下载器知道是否支持 Range 与文件大小（不传 body）。"""
     game = await db.get(Game, game_id)
     if not game:
@@ -185,18 +227,27 @@ async def download_to_pc_head(game_id: int, db: AsyncSession = Depends(get_db)):
     if game.resource_type not in {"nas_cloud", "nas_local"}:
         raise HTTPException(400, "仅 NAS 资源支持下载")
     path = _safe_path(game)
-    if path.is_file():
-        headers = _download_headers(path, quote(path.name))
+    inner = path if path.is_file() else _single_file_in(path)
+    if inner is not None:
+        headers = _download_headers(inner, quote(inner.name))
         headers["Accept-Ranges"] = "bytes"
-        headers["Content-Length"] = str(path.stat().st_size)
+        headers["Content-Length"] = str(inner.stat().st_size)
         headers["Content-Type"] = "application/octet-stream"
         return Response(status_code=200, headers=headers)
-    headers = _download_headers(path, quote(f"{path.name}.zip"))
-    headers["Accept-Ranges"] = "none"
-    headers["Content-Type"] = "application/zip"
-    zsize = zip_stored_size(path)
-    if zsize:
-        headers["Content-Length"] = str(zsize)
+    if request.query_params.get("fmt") == "zip":
+        headers = _download_headers(path, quote(f"{path.name}.zip"))
+        headers["Accept-Ranges"] = "none"
+        headers["Content-Type"] = "application/zip"
+        zsize = zip_stored_size(path)
+        if zsize:
+            headers["Content-Length"] = str(zsize)
+        return Response(status_code=200, headers=headers)
+    _segs, total = tar_layout(path)
+    headers = _download_headers(path, quote(f"{path.name}.tar"))
+    headers["Accept-Ranges"] = "bytes"
+    headers["Content-Type"] = "application/x-tar"
+    if total:
+        headers["Content-Length"] = str(total)
     return Response(status_code=200, headers=headers)
 
 
