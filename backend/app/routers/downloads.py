@@ -7,14 +7,15 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..database import SessionLocal, get_db
-from ..download_engine import copy_path, iter_file_parallel, pick_engine, threads_for
+from ..download_engine import (copy_path, iter_file_parallel, iter_file_range,
+                                pick_engine, threads_for, zip_stored_size)
 from ..models import AsyncTask, Game, SystemConfig
 from ..task_manager import task_manager
 
@@ -38,17 +39,22 @@ def _safe_path(game: Game) -> Path:
 
 
 def _zip_stream(directory: Path, threads: int):
-    """目录打包成 zip。
+    """目录打包成 zip（**STORED 不压缩**）。
 
     每个文件用**并行分段读**喂给 zip writer（读端提速），
     写 zip 本身仍单线程（zip 必须顺序写）。
+
+    ⚠️ 用 STORED 而非 DEFLATED：游戏文件（apk/obb/rar/zip）本身已是压缩格式，
+    再 deflate 纯属浪费 CPU（实测把整包下载压到 ~10MB/s）。STORED 后大小可精确
+    预计算（`download_engine.zip_stored_size`），从而给出 Content-Length 让客户端显示进度。
     """
-    chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=32)
+    # 缓冲别太小：8KB 分片 + maxsize=32 只有 256KB，生产者会被频繁阻塞，
+    # 实测把目录下载压在 ~12MB/s。改为整块入队 + 更大缓冲，减少锁/调度开销。
+    chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=64)
 
     class Writer:
         def write(self, data):
-            for offset in range(0, len(data), 8192):
-                chunks.put(data[offset: offset + 8192])
+            chunks.put(data)
             return len(data)
 
         def flush(self):
@@ -59,7 +65,7 @@ def _zip_stream(directory: Path, threads: int):
 
     def produce():
         try:
-            with zipfile.ZipFile(Writer(), "w", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+            with zipfile.ZipFile(Writer(), "w", zipfile.ZIP_STORED, allowZip64=True) as archive:
                 for file in sorted(directory.rglob("*")):
                     if not file.is_file():
                         continue
@@ -67,7 +73,7 @@ def _zip_stream(directory: Path, threads: int):
                     try:
                         st = file.stat()
                         info = zipfile.ZipInfo(arc, date_time=time.localtime(st.st_mtime)[:6])
-                        info.compress_type = zipfile.ZIP_DEFLATED
+                        info.compress_type = zipfile.ZIP_STORED
                         info.external_attr = (st.st_mode & 0xFFFF) << 16
                     except Exception:                             # noqa: BLE001
                         info = arc
@@ -90,8 +96,43 @@ def _zip_stream(directory: Path, threads: int):
         yield chunk
 
 
+def _parse_range(value: str | None, size: int):
+    """解析单段 Range：bytes=start-end / bytes=start- / bytes=-suffix。
+
+    返回 (start, end)（含端点）或 None。只支持单段（IDM 的并发连接每条约一段）。
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if not value.lower().startswith("bytes="):
+        return None
+    spec = value[6:].split(",")[0].strip()
+    if "-" not in spec:
+        return None
+    a, b = spec.split("-", 1)
+    try:
+        if a == "":
+            n = int(b)
+            if n <= 0:
+                return None
+            start, end = max(0, size - n), size - 1
+        else:
+            start = int(a)
+            end = int(b) if b else size - 1
+    except ValueError:
+        return None
+    end = min(end, size - 1)
+    if start < 0 or start > end or start >= size:
+        return None
+    return start, end
+
+
+def _download_headers(path: Path, filename: str) -> dict:
+    return {"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
+
+
 @router.get("/games/{game_id}/download-to-pc")
-async def download_to_pc(game_id: int, db: AsyncSession = Depends(get_db)):
+async def download_to_pc(game_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(404, "游戏不存在")
@@ -101,21 +142,66 @@ async def download_to_pc(game_id: int, db: AsyncSession = Depends(get_db)):
     engine = pick_engine(game.resource_type, path)
     threads = threads_for(engine)
     if path.is_file():
-        filename = quote(path.name)
-        headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
+        size = path.stat().st_size
+        headers = _download_headers(path, quote(path.name))
+        headers["Accept-Ranges"] = "bytes"
         if engine == "fuse" and threads > 1:
-            # 挂载源：分段并发读 → 流式响应（替代单流 FileResponse，实测快约 4 倍）
-            headers["Content-Length"] = str(path.stat().st_size)
-            return StreamingResponse(iter_file_parallel(path, threads),
-                                     media_type="application/octet-stream", headers=headers)
-        return FileResponse(path, filename=path.name, media_type="application/octet-stream")
+            # 挂载源：分段并发读 → 流式响应；**支持 Range**，让 IDM 等外部下载器
+            # 开多条连接并行（每条连接内部仍多线程读，实测能跑满）。
+            rng = _parse_range(request.headers.get("range"), size)
+            if rng is None:
+                start, end, status = 0, size - 1, 200
+                body = iter_file_parallel(path, threads, start, end - start + 1)
+            else:
+                start, end = rng
+                status = 206
+                headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+                # Range 走**单线程顺序读**：并行度交给客户端的多条连接，
+                # 避免「连接数 × 内部线程数」超额订阅（实测 8 连接反而更慢）。
+                body = iter_file_range(path, start, end - start + 1)
+            headers["Content-Length"] = str(end - start + 1)
+            return StreamingResponse(
+                body, status_code=status, media_type="application/octet-stream", headers=headers)
+        # 本地磁盘：FileResponse 原生支持 Range + Content-Length
+        return FileResponse(path, filename=path.name,
+                            media_type="application/octet-stream", headers=headers)
+    # 目录：STORED 流式 zip；预计算大小 → 客户端能显示下载进度
     filename = quote(f"{path.name}.zip")
+    headers = _download_headers(path, filename)
+    headers["Accept-Ranges"] = "none"
+    zsize = zip_stored_size(path)
+    if zsize:
+        headers["Content-Length"] = str(zsize)
     return StreamingResponse(_zip_stream(path, threads), media_type="application/zip",
-                             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
+                             headers=headers)
+
+
+@router.head("/games/{game_id}/download-to-pc")
+async def download_to_pc_head(game_id: int, db: AsyncSession = Depends(get_db)):
+    """HEAD 探测：让 IDM 等外部下载器知道是否支持 Range 与文件大小（不传 body）。"""
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "游戏不存在")
+    if game.resource_type not in {"nas_cloud", "nas_local"}:
+        raise HTTPException(400, "仅 NAS 资源支持下载")
+    path = _safe_path(game)
+    if path.is_file():
+        headers = _download_headers(path, quote(path.name))
+        headers["Accept-Ranges"] = "bytes"
+        headers["Content-Length"] = str(path.stat().st_size)
+        headers["Content-Type"] = "application/octet-stream"
+        return Response(status_code=200, headers=headers)
+    headers = _download_headers(path, quote(f"{path.name}.zip"))
+    headers["Accept-Ranges"] = "none"
+    headers["Content-Type"] = "application/zip"
+    zsize = zip_stored_size(path)
+    if zsize:
+        headers["Content-Length"] = str(zsize)
+    return Response(status_code=200, headers=headers)
 
 
 async def _transfer(game_id: int, target_subdir: str, task: dict):
-    task_manager.start(task)
+    task_manager.start(task, "正在转存…")
     try:
         async with SessionLocal() as db:
             game = await db.get(Game, game_id)

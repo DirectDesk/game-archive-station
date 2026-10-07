@@ -27,6 +27,78 @@ from .services import fetch_game_screenshots
 logger = logging.getLogger(__name__)
 
 
+def _bdecode(data: bytes, i: int = 0):
+    """极简 bencode 解码（只用到 torrent 的字典/列表/整数/字符串）。"""
+    ch = data[i:i + 1]
+    if ch == b"i":
+        j = data.index(b"e", i)
+        return int(data[i + 1:j]), j + 1
+    if ch == b"l":
+        i += 1
+        out = []
+        while data[i:i + 1] != b"e":
+            v, i = _bdecode(data, i)
+            out.append(v)
+        return out, i + 1
+    if ch == b"d":
+        i += 1
+        out = {}
+        while data[i:i + 1] != b"e":
+            k, i = _bdecode(data, i)
+            v, i = _bdecode(data, i)
+            out[k] = v
+        return out, i + 1
+    j = data.index(b":", i)
+    n = int(data[i:j])
+    i = j + 1
+    return data[i:i + n], i + n
+
+
+def torrent_content_size(path) -> int:
+    """解析 .torrent（bencode）里 info 声明的总字节数；失败返回 0。"""
+    try:
+        raw = Path(path).read_bytes()
+        meta, _ = _bdecode(raw)
+        info = meta.get(b"info") if isinstance(meta, dict) else None
+        if not isinstance(info, dict):
+            return 0
+        if b"files" in info:
+            total = 0
+            for f in info.get(b"files") or []:
+                if isinstance(f, dict):
+                    total += int(f.get(b"length") or 0)
+            return total
+        return int(info.get(b"length") or 0)
+    except Exception:                                             # noqa: BLE001
+        return 0
+
+
+def resource_size(path) -> int:
+    """资源容量。
+
+    - 文件：文件大小。
+    - 目录：**整个文件夹递归求和**；若目录里含 .torrent 且其声明的内容更大
+      （典型：目录里只有种子、真正内容还没下），取种子声明的大小。
+    """
+    path = str(path)
+    if os.path.isfile(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+    real, torrent = 0, 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            fp = os.path.join(root, name)
+            try:
+                real += os.path.getsize(fp)
+            except OSError:
+                pass
+            if name.lower().endswith(".torrent"):
+                torrent = max(torrent, torrent_content_size(fp))
+    return max(real, torrent)
+
+
 class _SkipSearch(Exception):
     pass
 
@@ -356,20 +428,19 @@ class LibraryScanner:
                     exists.resource_url = folder_path
                     await db.commit()
                     logger.info("刮削粒度/路径归一：game_id=%s resource_url -> %s", exists.id, folder_path)
-                if exists and (not exists.file_size or exists.file_size == 0):
+                if exists:
                     try:
+                        # 目录型资源：容量 = 整个文件夹（递归；只有种子时取种子声明大小）。
+                        # 文件夹内容会随下载/整理变化，所以**每次扫描都刷新**——旧逻辑
+                        # 只在 file_size 为空/0 时补，导致「入库后文件夹又加了内容」的记录
+                        # 容量长期偏小（如弹丸论破2 停在 44MB、AI Shoujo 停在 4GB）。
                         _sz = known_size or 0
-                        if not _sz:
-                            if os.path.isfile(folder_path):
-                                _sz = os.path.getsize(folder_path)
-                            else:
-                                for _root, _dirs, _files in os.walk(folder_path):
-                                    for _f in _files:
-                                        try: _sz += os.path.getsize(os.path.join(_root, _f))
-                                        except OSError: pass
-                        exists.file_size = _sz
-                        await db.commit()
-                        logger.info("更新游戏容量：game_id=%s, size=%d", exists.id, _sz)
+                        if not _sz or os.path.isdir(folder_path):
+                            _sz = resource_size(folder_path)
+                        if _sz and _sz != (exists.file_size or 0):
+                            exists.file_size = _sz
+                            await db.commit()
+                            logger.info("更新游戏容量：game_id=%s, size=%d", exists.id, _sz)
                     except Exception:
                         pass
                 return False
@@ -587,17 +658,9 @@ class LibraryScanner:
             # 资源大小：优先用扫描已知的单元大小，否则回退到实际文件/目录。
             # 提前算好，供 custom（未匹配）与匹配成功两条分支共用。
             _size = known_size or 0
-            if not _size:
+            if not _size or os.path.isdir(folder_path):
                 try:
-                    if os.path.isfile(folder_path):
-                        _size = os.path.getsize(folder_path)
-                    else:
-                        for _root_s, _dirs_s, _files_s in os.walk(folder_path):
-                            for _f_s in _files_s:
-                                try:
-                                    _size += os.path.getsize(os.path.join(_root_s, _f_s))
-                                except OSError:
-                                    pass
+                    _size = resource_size(folder_path)
                 except Exception:
                     pass
             if not candidates:

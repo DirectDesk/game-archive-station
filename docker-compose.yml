@@ -27,6 +27,8 @@ services:
       # 挂载源（/vol/baidu）走「分段并发直读」，FUSE_THREADS 控制并发（4~8 最佳）。
       # ARIA_* 仅在「有直链的云端网盘」时用到；secret 从同目录 .env 读取（不入库）。
       - FUSE_THREADS=${FUSE_THREADS:-8}
+      # 下载方式：internal=内置 / external=外置 aria2（见 README「外置下载」）
+      - DOWNLOAD_ENGINE=${DOWNLOAD_ENGINE:-internal}
       - ARIA_RPC=${ARIA_RPC:-http://192.168.20.10:6800/jsonrpc}
       - ARIA_SECRET=${ARIA_SECRET:-}
     volumes:

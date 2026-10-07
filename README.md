@@ -26,6 +26,9 @@
 - 目录扫描（增量 / 全量）、定时扫描（Cron）
 - 云盘链接与 NAS 本地路径并存
 - 云盘游戏转存到本地目录，带后台任务与进度
+- 「下载到本机」支持 **HTTP Range**（IDM / 迅雷等多连接下载器可并行、可续传），
+  目录打包为 **STORED zip**（不压缩、带精确 `Content-Length`，客户端能显示进度）
+- 下载方式可选 **内置下载** / **外置下载（aria2）**，见下文「外置下载」
 
 **界面**
 - 首页卡片分页（18 / 36 / 54 每页）、类型筛选
@@ -132,6 +135,86 @@ cd frontend && npm install && npm run dev
 > 镜像内的构建产物会被挂载覆盖。改前端后执行 `npm run build`，把 `dist/` 部署到挂载目录即可，
 > **不必重建镜像**。
 
+### 外置下载（aria2，可选）
+
+**设置 → 下载设置** 里可切换下载方式：
+
+| 方式 | 说明 |
+|---|---|
+| **内置下载**（默认） | 应用自己读源文件：挂载源（云盘挂载）用多线程并发直读；直链源用 httpx 多连接。 |
+| **外置下载** | 把**直链源**交给外部 aria2（JSON-RPC）下载，应用轮询 `tellStatus` 显示进度。 |
+
+> ⚠️ **挂载源（fuse，如 `/vol/baidu`）始终走内置下载**——aria2 只接受 URL，
+> 读不了挂载路径。外置下载只对「有 `http(s)` 直链」的来源生效。
+> 进度不会丢：应用通过 `aria2.tellStatus` 轮询 `completedLength / totalLength`，外置同样有进度条。
+
+#### 1. 部署 aria2（NAS 宿主）
+
+`/home/admin/oldl/aria2.conf`：
+
+```ini
+enable-rpc=true
+rpc-listen-all=true
+rpc-listen-port=6800
+rpc-secret=<你的密钥>       # 32 位 [A-Za-z0-9]（不是 hex）
+file-allocation=none        # 默认 falloc 会让表观大小瞬间到位，误导进度
+continue=true
+```
+
+`/etc/systemd/system/oldl-aria2.service`（注意 **User=admin**）：
+
+```ini
+[Unit]
+Description=aria2 for game-archive
+[Service]
+User=admin
+ExecStart=/usr/bin/aria2c --conf-path=/home/admin/oldl/aria2.conf
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now oldl-aria2
+```
+
+#### 2. 在 `.env` 里填密钥并让 compose 引用
+
+```bash
+# 与 docker-compose.yml 同目录的 .env（chmod 600，已在 .gitignore）
+ARIA_RPC=http://<NAS_IP>:6800/jsonrpc
+ARIA_SECRET=<与 aria2.conf 里一致的密钥>
+DOWNLOAD_ENGINE=external
+```
+
+⚠️ **光建 `.env` 不生效**：compose 的 `environment` 必须写成 `${...}` 引用：
+
+```yaml
+environment:
+  - ARIA_RPC=${ARIA_RPC:-http://192.168.20.10:6800/jsonrpc}
+  - ARIA_SECRET=${ARIA_SECRET:-}
+  - DOWNLOAD_ENGINE=${DOWNLOAD_ENGINE:-internal}
+```
+
+改完 `docker compose up -d`（无需重建镜像）。
+
+#### 3. 目录权限
+
+aria2 以 **admin** 跑，而下载目录常是容器 root 建的 0755：
+
+```bash
+sudo chmod 777 <下载目录>          # 例如 /vol1/1000/docker/game-archive/downloads
+```
+
+#### 常见坑
+
+- **`Download aborted.` 且 `tellStatus` 里 `pieces` 已正确** → 先看
+  `/home/admin/oldl/aria2.log`，多半是 `dir` 传了**容器内路径**（如 `/vol/download`，
+  宿主不存在）或目录权限 `Permission denied`，**不是网络/密钥/直链问题**。
+- **`dir` 必须给宿主真实路径**：`/vol1/1000/docker/game-archive/downloads`。
+- secret 是 32 位 `[A-Za-z0-9]`，**不是 hex**；读取时不要用 `sudo -S`（密码回显会污染）。
+- 设置页「测试 aria2 连接」可直接验证 RPC 是否可达。
+
 ---
 
 ## 环境变量
@@ -146,6 +229,10 @@ cd frontend && npm install && npm run dev
 | `SCAN_THROTTLE_MS` | `50` | 扫描节流间隔（毫秒） |
 | `SCAN_WEEKLY_FULL_CHECK` | `false` | 是否每周做一次全量校验 |
 | `SCAN_ROOT` | `/vol/baidu` | 容器内扫描根目录（WebDAV 挂载点） |
+| `FUSE_THREADS` | `8` | 挂载源并发直读的线程数（4~8 最佳，16 反而降速） |
+| `DOWNLOAD_ENGINE` | `internal` | 下载方式：`internal` 内置 / `external` 外置（aria2） |
+| `ARIA_RPC` | `http://192.168.20.10:6800/jsonrpc` | aria2 JSON-RPC 地址（仅外置下载用） |
+| `ARIA_SECRET` | 空 | aria2 RPC 密钥（仅外置下载用，**放 `.env`，勿入库**） |
 
 `.env` 已在 `.gitignore` 中，**不会入库**。
 

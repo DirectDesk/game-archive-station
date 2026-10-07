@@ -29,6 +29,9 @@ def _output(config: SystemConfig) -> dict:
     data = {column.name: getattr(config, column.name) for column in config.__table__.columns}
     for field in {"rawg_api_key", "tencent_secret_id", "tencent_secret_key"}:
         data[f"{field}_configured"] = bool(getattr(config, field))
+    # 外置下载（aria2）：只暴露「是否已配置」，不外泄 secret
+    data["aria_configured"] = bool(settings.aria_secret or settings.aria_secret_file)
+    data["aria_rpc"] = settings.aria_rpc
     return data
 
 
@@ -49,6 +52,7 @@ async def update_settings(payload: SettingsUpdate, db: AsyncSession = Depends(ge
     settings.scan_throttle_ms = config.scan_throttle_ms
     settings.rawg_api_key = config.rawg_api_key
     settings.download_dir = Path(config.download_dir)
+    settings.download_engine = config.download_engine or "internal"
     scan_scheduler.reload(config)
     await translation_service.load(db)
     return _output(config)
@@ -92,6 +96,18 @@ async def test_translator(payload: TranslatorTestPayload | None = None, db: Asyn
     if suspicious:
         raise HTTPException(502, "翻译服务无响应（返回原文），请检查密钥或网络")
     return {"ok": True, "result": translated, "translator": ttype}
+
+
+@router.post("/test-aria2")
+async def test_aria2():
+    """测试外置下载（aria2 JSON-RPC）连通性。"""
+    from ..download_engine import aria2_version
+
+    try:
+        info = aria2_version()
+    except Exception as exc:                                      # noqa: BLE001
+        raise HTTPException(502, f"aria2 连接失败：{exc}") from exc
+    return {"ok": True, **info}
 
 
 @router.post("/test-rawg")

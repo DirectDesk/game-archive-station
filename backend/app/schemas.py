@@ -136,6 +136,7 @@ class SettingsUpdate(BaseModel):
     scan_root: str | None = Field(default=None, max_length=500)
     local_game_root: str | None = Field(default=None, max_length=500)
     download_dir: str | None = Field(default=None, max_length=500)
+    download_engine: Literal["internal", "external"] | None = None
     rawg_api_key: str | None = Field(default=None, max_length=200)
     auto_translate: bool | None = None
     # 保护用户手工译名：术语表变更/重翻译时不覆盖 game.title
@@ -147,6 +148,7 @@ class SettingsUpdate(BaseModel):
     metadata_source_priority: str | None = None
     cover_source_priority: str | None = None
     screenshot_source_priority: str | None = None
+    tag_source_priority: str | None = None
     scan_fetch_screenshots: bool | None = None
     max_screenshots: int | None = None
 

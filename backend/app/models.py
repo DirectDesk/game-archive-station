@@ -70,6 +70,8 @@ class SystemConfig(Base):
     scan_root: Mapped[str] = mapped_column(String(500), default="/vol/baidu")
     local_game_root: Mapped[str] = mapped_column(String(500), default="/vol/games")
     download_dir: Mapped[str] = mapped_column(String(500), default="/vol/download/game")
+    # 下载方式：internal=内置下载 / external=外置下载（aria2）。见 config.Settings.download_engine
+    download_engine: Mapped[str] = mapped_column(String(20), default="internal")
     rawg_api_key: Mapped[str] = mapped_column(String(200), default="")
     auto_translate: Mapped[bool] = mapped_column(Boolean, default=False)
     translator_type: Mapped[str] = mapped_column(String(20), default="none")

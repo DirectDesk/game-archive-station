@@ -117,6 +117,7 @@ async def lifespan(app: FastAPI):
             settings.scan_root = Path(config.scan_root)
             settings.local_game_root = Path(config.local_game_root)
             settings.download_dir = Path(config.download_dir)
+            settings.download_engine = getattr(config, "download_engine", None) or settings.download_engine
             settings.scan_throttle_ms = config.scan_throttle_ms
             settings.rawg_api_key = config.rawg_api_key or settings.rawg_api_key
         scan_scheduler.start(config)

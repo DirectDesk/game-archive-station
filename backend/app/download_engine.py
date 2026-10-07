@@ -135,18 +135,23 @@ def _spans(size: int, threads: int, block: int = BLOCK):
     return nblocks, per, spans
 
 
-def iter_file_parallel(path, threads: int = 8):
+def iter_file_parallel(path, threads: int = 8, start: int = 0, length: int | None = None):
     """按顺序产出文件分块（供 HTTP 流式响应）。fuse 源用它替代单流 FileResponse。
 
     读法：每线程守一段连续块区间，各自 open 句柄 + 256KB 顺序读；
     消费端按块号**顺序**产出，用「每线程领先窗口」限内存（不会因乱序死锁：
     消费端卡在某块时，该块的线程必然没被窗口挡住）。
+
+    `start` / `length` 供 HTTP Range 使用：只产出 [start, start+length) 这一段，
+    段内**仍然多线程并发读**（所以 IDM 每条连接都能吃满带宽）。
     """
     path = str(path)
-    size = os.path.getsize(path)
-    if size <= 0:
+    total = os.path.getsize(path)
+    if length is None:
+        length = max(0, total - start)
+    if length <= 0:
         return
-    nblocks, per, spans = _spans(size, threads)
+    nblocks, per, spans = _spans(length, threads)
     state = {"stop": False, "err": "", "alive": len(spans)}
     inflight = {t: 0 for t, _b0, _b1 in spans}
     cond = threading.Condition()
@@ -155,7 +160,7 @@ def iter_file_parallel(path, threads: int = 8):
     def reader(t, b0, b1):
         try:
             with open(path, "rb") as fh:        # 每线程独立句柄（共享句柄 seek 不安全）
-                fh.seek(b0 * BLOCK)
+                fh.seek(start + b0 * BLOCK)
                 for bi in range(b0, b1):
                     with cond:
                         while not state["stop"] and inflight[t] >= WINDOW_BLOCKS:
@@ -163,7 +168,7 @@ def iter_file_parallel(path, threads: int = 8):
                         if state["stop"]:
                             return
                     off = bi * BLOCK
-                    data = fh.read(min(BLOCK, size - off))
+                    data = fh.read(min(BLOCK, length - off))
                     if not data:
                         with cond:
                             state["err"] = "提前 EOF @ %d" % off
@@ -209,6 +214,29 @@ def iter_file_parallel(path, threads: int = 8):
             cond.notify_all()
         for w in ws:
             w.join(timeout=5)
+
+
+def iter_file_range(path, start: int = 0, length: int | None = None):
+    """顺序产出 [start, start+length) 的分块（HTTP Range 请求用）。
+
+    ⚠️ **单线程**：外部下载器（IDM 等）本身会开多条连接，若每条连接内部再开 8 线程，
+    会变成「连接数 × 8」的超额订阅，实测反而从 20MB/s 掉到 8MB/s。
+    让每条连接保持顺序读，由多连接提供并行度 —— 实测 8 条并发顺序流 ≈ 31MB/s
+    （单流仅 ~11MB/s，挂载源单流上限就在这）。
+    """
+    path = str(path)
+    total = os.path.getsize(path)
+    if length is None:
+        length = max(0, total - start)
+    with open(path, "rb") as fh:
+        fh.seek(start)
+        remaining = length
+        while remaining > 0:
+            data = fh.read(min(BLOCK, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+            yield data
 
 
 def copy_file_parallel(src, dst, threads: int = 8, progress_cb=None, cancel=None):
@@ -461,6 +489,149 @@ def download_url(url: str, dest: str, threads: int = 8, progress_cb=None, cancel
         time.sleep(0.5)
 
 
+# ---------------------------------------------------------------- zip 大小预计算
+
+# zip 流式（非 seekable 输出）的固定开销：本地头 30 + data descriptor 16
+# + 中央目录 46 + EOCD 22。见 `zip_stored_size` 的说明。
+_ZIP_LOCAL, _ZIP_DESC, _ZIP_CENTRAL, _ZIP_EOCD = 30, 16, 46, 22
+_ZIP_MAX32 = 0xFFFFFFFF
+
+
+def zip_stored_size(directory):
+    """预计算 STORED 流式 zip 的精确字节数（用于 Content-Length，让客户端显示进度）。
+
+    与 `routers/downloads.py::_zip_stream` 的布局一一对应：zipfile 往**非 seekable**
+    输出写 STORED 时，每个文件 = 本地头(30) + 文件名(utf-8) + 数据 + data descriptor(16)；
+    结尾 = 中央目录(46 + 文件名) + EOCD(22)。已实测与 zipfile 实际输出**完全一致**。
+
+    任一文件 ≥4GB 或总量 ≥4GB 会触发 zip64 额外字段 → 公式失效，返回 None（调用方改 chunked）。
+    """
+    directory = Path(directory)
+    total = 0
+    name_lens = []
+    for f in sorted(directory.rglob("*")):
+        if not f.is_file():
+            continue
+        try:
+            size = f.stat().st_size
+        except OSError:
+            continue
+        arc = str(f.relative_to(directory.parent)).replace(os.sep, "/")
+        nb = len(arc.encode("utf-8"))
+        total += _ZIP_LOCAL + nb + size + _ZIP_DESC
+        name_lens.append(nb)
+        if size >= _ZIP_MAX32 or total >= _ZIP_MAX32:
+            return None
+    for nb in name_lens:
+        total += _ZIP_CENTRAL + nb
+    total += _ZIP_EOCD
+    return total if total < _ZIP_MAX32 else None
+
+
+# ---------------------------------------------------------------- 内置 HTTP 下载（直链源）
+
+def _byte_segments(total: int, n: int):
+    """把 [0,total) 均分成 n 段连续字节区间，返回 [(start, end), ...]（end 含）。"""
+    n = max(1, min(n, total))
+    per = (total + n - 1) // n
+    segs = []
+    for i in range(n):
+        a = i * per
+        b = min(total, a + per) - 1
+        if a <= b:
+            segs.append((a, b))
+    return segs
+
+
+def download_url_builtin(url: str, dest: str, threads: int = 8, progress_cb=None, cancel=None):
+    """内置多连接 HTTP 下载（直链源，不依赖 aria2）。
+
+    先用 HEAD 探 Content-Length 与 Accept-Ranges；支持 Range 就按段并发拉取，
+    每段直接写目标文件的对应偏移；不支持则回退单连接整文件下载。
+    返回 (ok, path)。
+    """
+    dest_p = Path(dest)
+    dest_p.mkdir(parents=True, exist_ok=True)
+    _relax_dir(dest_p)
+    filename = url.split("?")[0].rstrip("/").split("/")[-1] or "download.bin"
+    target = dest_p / filename
+    n = max(1, min(16, int(threads)))
+    timeout = httpx.Timeout(30.0, read=120.0)
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        total, accept = 0, False
+        try:
+            head = client.head(url)
+            accept = head.headers.get("accept-ranges", "").lower() == "bytes"
+            total = int(head.headers.get("content-length") or 0)
+        except Exception:                                         # noqa: BLE001
+            accept, total = False, 0
+        if not accept or total <= 0 or n == 1:
+            with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length") or 0)
+                done = 0
+                with open(target, "wb") as fh:
+                    for chunk in resp.iter_bytes(1 << 20):
+                        if cancel is not None and cancel.is_set():
+                            return False, ""
+                        fh.write(chunk)
+                        done += len(chunk)
+                        if progress_cb:
+                            progress_cb(done, total)
+            return True, str(target)
+        fd = os.open(str(target), os.O_WRONLY | os.O_CREAT)
+        os.ftruncate(fd, total)
+        lock = threading.Lock()
+        done = [0]
+        err = [""]
+
+        def worker(a, b):
+            try:
+                with client.stream("GET", url, headers={"Range": "bytes=%d-%d" % (a, b)}) as resp:
+                    if resp.status_code not in (200, 206):
+                        raise RuntimeError("HTTP %s" % resp.status_code)
+                    off = a
+                    for chunk in resp.iter_bytes(1 << 20):
+                        if cancel is not None and cancel.is_set():
+                            return
+                        _pwrite(fd, chunk, off)
+                        off += len(chunk)
+                        with lock:
+                            done[0] += len(chunk)
+            except Exception as exc:                              # noqa: BLE001
+                with lock:
+                    err[0] = str(exc)
+
+        ws = [threading.Thread(target=worker, args=seg, daemon=True)
+              for seg in _byte_segments(total, n)]
+        for w in ws:
+            w.start()
+        last = -1
+        while any(w.is_alive() for w in ws):
+            if progress_cb:
+                with lock:
+                    d = done[0]
+                if d != last:
+                    progress_cb(d, total)
+                    last = d
+            time.sleep(0.25)
+        for w in ws:
+            w.join()
+        try:
+            os.close(fd)
+        except Exception:                                         # noqa: BLE001
+            pass
+        with lock:
+            d, e = done[0], err[0]
+        if progress_cb:
+            progress_cb(d, total)
+        if cancel is not None and cancel.is_set():
+            return False, ""
+        if e:
+            raise RuntimeError(e)
+        return (d == total), str(target)
+
+
 # ---------------------------------------------------------------- 统一入口
 
 def copy_path(src, dst, resource_type: str = "", progress_cb=None, cancel=None):
@@ -470,13 +641,21 @@ def copy_path(src, dst, resource_type: str = "", progress_cb=None, cancel=None):
         def cb(done, total):
             if progress_cb:
                 progress_cb(done, total, 1 if done >= total else 0, 1)
-        ok, path = download_url(str(src), str(dst), threads_for("fuse"), cb, cancel)
+        # 「外置下载」开关：external → 交给 aria2（多连接、可轮询进度）；
+        # internal（或 aria2 未配置）→ 内置 httpx 多连接下载。
+        if getattr(settings, "download_engine", "internal") == "external":
+            try:
+                ok, path = download_url(str(src), str(dst), threads_for("fuse"), cb, cancel)
+            except RuntimeError:
+                ok, path = download_url_builtin(str(src), str(dst), threads_for("fuse"), cb, cancel)
+        else:
+            ok, path = download_url_builtin(str(src), str(dst), threads_for("fuse"), cb, cancel)
         size = 0
         try:
             size = os.path.getsize(path)
         except Exception:                                         # noqa: BLE001
             pass
-        return ok, "" if ok else "aria2 下载失败", 1 if ok else 0, size
+        return ok, "" if ok else "下载失败", 1 if ok else 0, size
     if engine == "local":
         src_p, dst_p = Path(src), Path(dst)
         if src_p.is_file():
