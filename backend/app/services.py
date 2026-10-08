@@ -715,6 +715,36 @@ def alias_candidates(text: str) -> list[str]:
     return result
 
 
+# 「有意义的字符」= 拉丁字母/数字 + 汉字 + 假名（含半角カナ）。
+# ⚠️ **必须包含假名**：纯假名标题（如「アイコミ」）若只认 A-Za-z0-9/汉字会被整条过滤掉，
+# 表现为「DLsite/VNDB 明明收录、应用里却搜不到任何候选」。
+_MEANINGFUL = "A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f"
+_MEANINGFUL_RE = re.compile("[" + _MEANINGFUL + "]")
+_MEANINGFUL_SPLIT_RE = re.compile("[^" + _MEANINGFUL + "]+")
+_KANA_RE = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]")
+
+# 发布文件夹名的常见噪声：发布组标签 / 括号说明 / 版本号 / 汉化破解等中文说明。
+_NOISE_RES = (
+    re.compile(r"\[[^\]]*\]"),                          # [ILLGAMES] [汉化组]
+    re.compile(r"[（(][^）)]*[）)]"),                  # (甘夏之地) （汉化版）
+    re.compile(r"(?i)\bv(?:er)?\.?\d+(?:\.\d+){0,3}\b"),     # v1 / Ver1.2.3
+    re.compile(r"更新|汉化|漢化|破解|免安装|免安裝|整合|官中|中文版|汉化版|补丁|補丁|绿色版|绿色|便携版"),
+)
+
+
+def _core_name(text: str) -> str:
+    """从「发布文件夹名」里剥掉发布组/版本/汉化等噪声，得到较干净的核心名。
+
+    例：'[ILLGAMES] 甘夏ろけーしょん(甘夏之地) v1  更新ai汉化' -> '甘夏ろけーしょん'。
+    动机：直接把脏文件夹名当搜索词拿去搜 DLsite/VNDB 必然 0 条。
+    """
+    s = str(text or "")
+    for r in _NOISE_RES:
+        s = r.sub(" ", s)
+    s = re.sub(r"[._\-]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def build_probes(title: str, extra: list[str] | None = None, limit: int = 6) -> list[str]:
     """构造跨源搜索探针（按优先级：额外英文名 > 归一化标题 > 原标题 > 别名候选）。
 
@@ -734,9 +764,9 @@ def build_probes(title: str, extra: list[str] | None = None, limit: int = 6) -> 
         # 清理后必须还剩至少一个"实义词元"：
         # 过滤 'Rance - -'、'- -' 这类仅由分隔符/残留符号构成的探针，
         # 它们会被归一化折叠成单个泛称词，命中整个系列（如 Rance 全系）。
-        if not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", v):
+        if not _MEANINGFUL_RE.search(v):
             return
-        if len([t for t in re.split(r"[^A-Za-z0-9\u4e00-\u9fff]+", v) if t]) < 1:
+        if len([t for t in _MEANINGFUL_SPLIT_RE.split(v) if t]) < 1:
             return
         if v.lower() not in {x.lower() for x in out}:
             out.append(v)
@@ -756,6 +786,17 @@ def build_probes(title: str, extra: list[str] | None = None, limit: int = 6) -> 
         _push(re.sub(r"[._]+", " ", str(title)).strip())
 
     _push(title)
+    # 发布文件夹名往往很脏（'[ILLGAMES] 甘夏ろけーしょん(甘夏之地) v1 更新ai汉化'），
+    # 直接拿去搜必然 0 条 → 补「剥掉噪声后的核心名」。
+    core = _core_name(title)
+    if core and core.lower() != str(title).strip().lower():
+        _push(core)
+    # 日文标题通常是清洗后核心名的第一个词（'アイコミ aicomi 爱与心通' -> 'アイコミ'）。
+    # 只在含假名时才补，避免给英文标题塞进 'Little' 这类泛称词探针。
+    if core:
+        first = core.split(" ")[0]
+        if len(first) >= 2 and _KANA_RE.search(first):
+            _push(first)
     for a in alias_candidates(title):
         _push(a)
         if len(out) >= limit:
